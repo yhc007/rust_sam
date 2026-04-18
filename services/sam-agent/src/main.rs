@@ -34,6 +34,7 @@ async fn main() -> Result<()> {
         Command::Daemon => cmd::daemon::run().await,
         Command::Reload => cmd::reload::run(),
         Command::Send { handle, text } => cmd::send::run(handle, text).await,
+        Command::ImportMemories { file } => cmd::import_memories::run(file).await,
     };
     std::process::exit(exit_code);
 }

@@ -42,4 +42,10 @@ pub enum Command {
         /// The message text to send.
         text: String,
     },
+
+    /// Import memories from a JSON file into the memory system.
+    ImportMemories {
+        /// Path to a JSON file: [{"text": "...", "tags": ["..."]}]
+        file: String,
+    },
 }
