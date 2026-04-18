@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sam.agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/paulyu/.local/bin/sam-agent</string>
+        <string>daemon</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SAM_LOG</key>
+        <string>info</string>
+    </dict>
+
+    <!-- Start on login -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart on crash (max 3 times within 60s) -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>20</integer>
+
+    <!-- Logs -->
+    <key>StandardOutPath</key>
+    <string>/Users/paulyu/.sam/logs/sam-agent.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/paulyu/.sam/logs/sam-agent.err</string>
+
+    <!-- Working directory -->
+    <key>WorkingDirectory</key>
+    <string>/Users/paulyu</string>
+
+    <!-- Soft kill before hard kill -->
+    <key>ExitTimeOut</key>
+    <integer>10</integer>
+</dict>
+</plist>
