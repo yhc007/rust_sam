@@ -244,12 +244,7 @@ async fn exec_run_command(input: &serde_json::Value, ctx: &ToolContext<'_>) -> R
     let working_dir = input["working_dir"]
         .as_str()
         .map(|s| sam_core::expand_tilde(s))
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string()
-        });
+        .unwrap_or_else(|| "/Volumes/T7/Sam".to_string());
 
     let timeout = input["timeout_secs"]
         .as_u64()
@@ -339,13 +334,7 @@ async fn exec_claude_code(input: &serde_json::Value, ctx: &ToolContext<'_>) -> R
     let working_dir = input["working_dir"]
         .as_str()
         .map(|s| sam_core::expand_tilde(s))
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .map(|h| h.join("work"))
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string()
-        });
+        .unwrap_or_else(|| "/Volumes/T7/Sam".to_string());
 
     // Ensure working directory exists.
     std::fs::create_dir_all(&working_dir)
