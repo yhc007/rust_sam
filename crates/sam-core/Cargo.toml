@@ -1,0 +1,15 @@
+[package]
+name = "sam-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Sam — shared types, config, paths, and errors"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+dirs.workspace = true
+tracing.workspace = true

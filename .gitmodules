@@ -1,0 +1,3 @@
+[submodule "vendor/memory-brain"]
+	path = vendor/memory-brain
+	url = https://github.com/yhc007/memory-brain.git

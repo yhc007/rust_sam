@@ -1,0 +1,15 @@
+[package]
+name = "sam-memory-adapter"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Sam — adapter around memory-brain's MemoryGuardian"
+
+[dependencies]
+sam-core = { path = "../sam-core" }
+memory-actor.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+anyhow.workspace = true

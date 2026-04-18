@@ -1,0 +1,29 @@
+[package]
+name = "sam-agent"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Sam — personal-assistant agent binary"
+
+[[bin]]
+name = "sam-agent"
+path = "src/main.rs"
+
+[dependencies]
+sam-core = { path = "../../crates/sam-core" }
+sam-imessage = { path = "../../crates/sam-imessage" }
+sam-claude = { path = "../../crates/sam-claude" }
+sam-tools = { path = "../../crates/sam-tools" }
+sam-memory-adapter = { path = "../../crates/sam-memory-adapter" }
+
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+colored.workspace = true
+chrono.workspace = true
+tokio-util.workspace = true

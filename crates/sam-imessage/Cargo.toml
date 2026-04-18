@@ -1,0 +1,18 @@
+[package]
+name = "sam-imessage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Sam — iMessage adapter (probe/reader/sender)"
+
+[dependencies]
+sam-core = { path = "../sam-core" }
+rusqlite.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+dirs.workspace = true
