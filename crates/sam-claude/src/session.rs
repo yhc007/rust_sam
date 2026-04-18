@@ -3,11 +3,12 @@
 
 use tracing::{info, warn};
 
+use sam_core::SamConfig;
 use sam_memory_adapter::MemoryAdapter;
 
 use crate::api::SamClaudeClient;
 use crate::budget::TokenBudget;
-use crate::tools::{builtin_tool_definitions, execute_builtin, MAX_TOOL_ROUNDS};
+use crate::tools::{builtin_tool_definitions, execute_builtin, ToolContext, MAX_TOOL_ROUNDS};
 use crate::types::*;
 
 /// A single conversation session identified by an iMessage handle.
@@ -42,15 +43,13 @@ impl ConversationSession {
     /// Runs an agentic loop: if Claude responds with tool_use, the tools
     /// are executed and the results fed back until Claude produces a final
     /// text response (or the loop limit is reached).
-    ///
-    /// If the daily token budget is exceeded, returns a friendly Korean
-    /// error message instead of failing hard.
     pub async fn reply(
         &mut self,
         client: &SamClaudeClient,
         budget: &mut TokenBudget,
         user_text: &str,
         memory: Option<&mut MemoryAdapter>,
+        config: &SamConfig,
     ) -> anyhow::Result<String> {
         // Append user message.
         self.history.push(ChatMessage::text("user", user_text));
@@ -59,8 +58,6 @@ impl ConversationSession {
         let mut total_input = 0u32;
         let mut total_output = 0u32;
 
-        // We need to reborrow memory across loop iterations.
-        // Use an Option that we can take/put back.
         let mut mem_opt = memory;
 
         for round in 0..MAX_TOOL_ROUNDS {
@@ -103,7 +100,11 @@ impl ConversationSession {
 
                 // Execute each tool and build tool_result messages.
                 for tc in &resp.tool_calls {
-                    let result = execute_builtin(&tc.name, &tc.input, mem_opt.as_deref_mut());
+                    let mut ctx = ToolContext {
+                        memory: mem_opt.as_deref_mut(),
+                        config,
+                    };
+                    let result = execute_builtin(&tc.name, &tc.input, &mut ctx).await;
                     let (result_text, is_error) = match result {
                         Ok(text) => (text, false),
                         Err(err) => (err, true),
@@ -123,7 +124,6 @@ impl ConversationSession {
             // stop_reason is "end_turn" (or max_tokens, etc.) — we have the final text.
             let total_tokens = total_input + total_output;
             if let Err(_e) = budget.check_and_record(total_tokens) {
-                // Remove the messages we added in this call.
                 self.history.pop();
                 return Ok("오늘 토큰 한도에 도달했어. 내일 다시 이야기하자!".to_string());
             }
@@ -155,7 +155,6 @@ impl ConversationSession {
             return Ok(resp.text);
         }
 
-        // Exhausted tool rounds — return whatever text we have.
         warn!(
             handle = %self.handle,
             "exhausted tool rounds ({MAX_TOOL_ROUNDS})"

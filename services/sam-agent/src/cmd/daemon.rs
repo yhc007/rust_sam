@@ -96,6 +96,7 @@ pub async fn run() -> i32 {
     // sessions and budget without Arc<Mutex>.
     let router_cancel = cancel.clone();
     let router_client = Arc::clone(&client);
+    let router_config = config.clone();
     let router_handle = tokio::spawn(async move {
         let mut sessions: HashMap<String, ConversationSession> = HashMap::new();
         // Dedup set: tracks texts we sent so we can skip the echo copies
@@ -135,6 +136,7 @@ pub async fn run() -> i32 {
                             &mut budget,
                             &m.text,
                             memory.as_mut(),
+                            &router_config,
                         ).await {
                             Ok(text) => text,
                             Err(e) => {

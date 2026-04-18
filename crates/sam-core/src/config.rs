@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::error::SamError;
 use crate::paths::expand_tilde;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SamConfig {
     #[serde(default)]
     pub identity: IdentityConfig,

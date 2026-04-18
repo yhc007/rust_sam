@@ -1618,6 +1618,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "dirs",
  "reqwest",
  "sam-core",
  "sam-memory-adapter",
