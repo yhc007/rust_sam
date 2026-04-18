@@ -119,6 +119,34 @@ mod tests {
     }
 
     #[test]
+    fn exact_budget_boundary() {
+        let mut budget = TokenBudget {
+            daily_limit: 100,
+            used_today: 0,
+            date: "2026-04-17".to_string(),
+        };
+
+        // Exactly at limit should succeed.
+        budget.check_and_record(100).expect("exact limit should succeed");
+        assert_eq!(budget.remaining(), 0);
+
+        // One more token should fail.
+        assert!(budget.check_and_record(1).is_err());
+    }
+
+    #[test]
+    fn zero_budget() {
+        let mut budget = TokenBudget {
+            daily_limit: 0,
+            used_today: 0,
+            date: "2026-04-17".to_string(),
+        };
+
+        assert!(budget.check_and_record(1).is_err());
+        assert_eq!(budget.remaining(), 0);
+    }
+
+    #[test]
     fn date_reset() {
         let mut budget = TokenBudget {
             daily_limit: 1000,

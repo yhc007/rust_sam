@@ -158,6 +158,61 @@ mod tests {
     }
 
     #[test]
+    fn chat_message_tool_result_roundtrip() {
+        let msg = ChatMessage::tool_result("toolu_01", "2024-01-01 12:00:00", false);
+        assert_eq!(msg.role, "user");
+        match &msg.content {
+            MessageContent::Blocks(blocks) => {
+                assert_eq!(blocks.len(), 1);
+                match &blocks[0] {
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => {
+                        assert_eq!(tool_use_id, "toolu_01");
+                        assert_eq!(content, "2024-01-01 12:00:00");
+                        assert!(!is_error);
+                    }
+                    _ => panic!("expected tool_result"),
+                }
+            }
+            _ => panic!("expected blocks"),
+        }
+    }
+
+    #[test]
+    fn tool_result_error_flag() {
+        let msg = ChatMessage::tool_result("toolu_02", "unknown tool: foo", true);
+        match &msg.content {
+            MessageContent::Blocks(blocks) => match &blocks[0] {
+                ContentBlock::ToolResult { is_error, .. } => assert!(is_error),
+                _ => panic!("expected tool_result"),
+            },
+            _ => panic!("expected blocks"),
+        }
+    }
+
+    #[test]
+    fn content_block_serialization() {
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "hello".to_string(),
+            },
+            ContentBlock::ToolUse {
+                id: "t1".to_string(),
+                name: "current_time".to_string(),
+                input: serde_json::json!({}),
+            },
+        ];
+        let json = serde_json::to_value(&blocks).unwrap();
+        assert!(json.is_array());
+        assert_eq!(json.as_array().unwrap().len(), 2);
+        assert_eq!(json[0]["type"], "text");
+        assert_eq!(json[1]["type"], "tool_use");
+    }
+
+    #[test]
     fn deserialize_tool_use_response() {
         let json = r#"{
             "id": "msg_xyz",

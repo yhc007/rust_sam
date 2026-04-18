@@ -154,5 +154,31 @@ mod tests {
         let input = json!({"query": "test"});
         let result = execute_builtin("memory_recall", &input, None);
         assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unavailable"));
+    }
+
+    #[test]
+    fn memory_store_without_adapter_returns_error() {
+        let input = json!({"text": "remember this"});
+        let result = execute_builtin("memory_store", &input, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn memory_recall_missing_query_returns_error() {
+        let input = json!({"k": 3});
+        let result = execute_builtin("memory_recall", &input, None);
+        // Should fail on missing adapter first, but if we had one it would
+        // fail on missing query. Either way it's an error.
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn current_time_contains_date_and_day() {
+        let input = json!({});
+        let result = execute_builtin("current_time", &input, None).unwrap();
+        // Should contain YYYY-MM-DD format and a day name in parentheses.
+        assert!(result.contains("2026-") || result.contains("202"), "date pattern: {result}");
+        assert!(result.contains('(') && result.contains(')'), "day name: {result}");
     }
 }

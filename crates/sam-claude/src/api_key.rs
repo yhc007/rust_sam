@@ -25,11 +25,11 @@ pub fn load_api_key(config: &LlmConfig) -> anyhow::Result<String> {
     if let Some(source) = config.api_key_source.as_deref() {
         if let Some(var_name) = source.strip_prefix("env:") {
             let key = std::env::var(var_name)
-                .map_err(|_| anyhow::anyhow!("API key env var not set"))?
+                .map_err(|_| anyhow::anyhow!("API key env var '{var_name}' not set"))?
                 .trim()
                 .to_string();
             if key.is_empty() {
-                anyhow::bail!("API key env var is empty");
+                anyhow::bail!("API key env var '{var_name}' is empty");
             }
             debug!("API key loaded from env var specified in config");
             return Ok(key);
@@ -38,11 +38,11 @@ pub fn load_api_key(config: &LlmConfig) -> anyhow::Result<String> {
         if let Some(file_path) = source.strip_prefix("file:") {
             let expanded = sam_core::expand_tilde(file_path);
             let key = std::fs::read_to_string(&expanded)
-                .map_err(|_| anyhow::anyhow!("API key file not readable"))?
+                .map_err(|e| anyhow::anyhow!("API key file '{expanded}' not readable: {e}"))?
                 .trim()
                 .to_string();
             if key.is_empty() {
-                anyhow::bail!("API key file is empty");
+                anyhow::bail!("API key file '{expanded}' is empty");
             }
             debug!("API key loaded from file specified in config");
             return Ok(key);

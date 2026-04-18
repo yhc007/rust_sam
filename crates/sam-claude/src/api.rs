@@ -20,13 +20,16 @@ pub struct SamClaudeClient {
 
 impl SamClaudeClient {
     /// Create a new client from an API key and LLM config.
-    pub fn new(api_key: String, config: &sam_core::LlmConfig) -> Self {
+    ///
+    /// Returns an error if the HTTP client cannot be constructed (e.g. TLS
+    /// backend unavailable).
+    pub fn new(api_key: String, config: &sam_core::LlmConfig) -> anyhow::Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(config.timeout_secs))
             .build()
-            .expect("failed to build HTTP client");
+            .map_err(|e| anyhow::anyhow!("failed to build HTTP client: {e}"))?;
 
-        Self {
+        Ok(Self {
             client,
             api_key,
             model: config.model.clone(),
@@ -34,7 +37,7 @@ impl SamClaudeClient {
             base_url: config.base_url.clone(),
             temperature: config.temperature,
             max_retries: config.max_retries,
-        }
+        })
     }
 
     /// Send a chat request to the Claude Messages API.
@@ -56,15 +59,16 @@ impl SamClaudeClient {
                 let content = match &m.content {
                     MessageContent::Text(s) => serde_json::Value::String(s.clone()),
                     MessageContent::Blocks(blocks) => {
-                        serde_json::to_value(blocks).unwrap_or_default()
+                        serde_json::to_value(blocks)
+                            .map_err(|e| anyhow::anyhow!("failed to serialize content blocks: {e}"))?
                     }
                 };
-                ApiMessage {
+                Ok(ApiMessage {
                     role: m.role.clone(),
                     content,
-                }
+                })
             })
-            .collect();
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
         let body = ClaudeApiRequest {
             model: self.model.clone(),
@@ -142,7 +146,8 @@ impl SamClaudeClient {
                     retries += 1;
                     if retries > self.max_retries {
                         let status = response.status();
-                        let body_text = response.text().await.unwrap_or_default();
+                        let body_text = response.text().await
+                            .unwrap_or_else(|e| format!("<body unreadable: {e}>"));
                         return Err(sam_core::SamError::ClaudeApi(format!(
                             "exhausted retries — last status {status}: {body_text}"
                         ))
@@ -154,7 +159,8 @@ impl SamClaudeClient {
                 }
                 Ok(response) => {
                     let status = response.status();
-                    let body_text = response.text().await.unwrap_or_default();
+                    let body_text = response.text().await
+                            .unwrap_or_else(|e| format!("<body unreadable: {e}>"));
                     return Err(sam_core::SamError::ClaudeApi(format!(
                         "HTTP {status}: {body_text}"
                     ))

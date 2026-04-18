@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Clippy (Sam crates)
+        run: >
+          cargo clippy
+          -p sam-core -p sam-imessage -p sam-claude
+          -p sam-tools -p sam-memory-adapter -p sam-agent
+          -- -D warnings
+          -A clippy::derivable_impls
+          -A clippy::should_implement_trait
+          -A clippy::redundant_closure

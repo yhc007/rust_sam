@@ -20,8 +20,11 @@ impl ProbeResult {
 }
 
 /// Default path to the macOS Messages chat database.
+///
+/// Falls back to `/var/root` if the home directory cannot be determined,
+/// which is appropriate for a daemon running as root.
 pub fn default_chat_db_path() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_default();
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/var/root"));
     home.join("Library/Messages/chat.db")
 }
 

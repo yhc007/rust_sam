@@ -42,7 +42,13 @@ pub async fn run() -> i32 {
         }
     };
 
-    let client = Arc::new(SamClaudeClient::new(api_key, &config.llm));
+    let client = match SamClaudeClient::new(api_key, &config.llm) {
+        Ok(c) => Arc::new(c),
+        Err(e) => {
+            eprintln!("HTTP client error: {e}");
+            return 2;
+        }
+    };
     let system_prompt = load_system_prompt();
     let max_history = config.llm.max_history;
     let mut budget = TokenBudget::load_or_new(config.llm.daily_token_budget);
