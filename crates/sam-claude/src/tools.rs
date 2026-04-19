@@ -1,7 +1,7 @@
 //! Built-in tools for Sam's Claude tool_use integration.
 //!
 //! Tools: memory_recall, memory_store, current_time, run_command,
-//! read_file, write_file, claude_code.
+//! read_file, write_file, claude_code, twitter_search.
 
 use std::path::Path;
 use std::time::Duration;
@@ -154,6 +154,25 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["prompt"]
             }),
         },
+        ToolDefinition {
+            name: "twitter_search".to_string(),
+            description: "트위터/X에서 최근 트윗을 검색한다. 특정 주제, 키워드, 해시태그에 대한 트윗을 찾을 때 사용.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "검색 쿼리 (예: 'AI', '#rust', 'from:elonmusk')"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "반환할 최대 트윗 수 (10-100, 기본 10)",
+                        "default": 10
+                    }
+                },
+                "required": ["query"]
+            }),
+        },
     ]
 }
 
@@ -173,6 +192,7 @@ pub async fn execute_builtin(
         "read_file" => exec_read_file(input),
         "write_file" => exec_write_file(input),
         "claude_code" => exec_claude_code(input, ctx).await,
+        "twitter_search" => exec_twitter_search(input, ctx).await,
         _ => Err(format!("unknown tool: {name}")),
     }
 }
@@ -243,7 +263,7 @@ async fn exec_run_command(input: &serde_json::Value, ctx: &ToolContext<'_>) -> R
 
     let working_dir = input["working_dir"]
         .as_str()
-        .map(|s| sam_core::expand_tilde(s))
+        .map(sam_core::expand_tilde)
         .unwrap_or_else(|| "/Volumes/T7/Sam".to_string());
 
     let timeout = input["timeout_secs"]
@@ -333,7 +353,7 @@ async fn exec_claude_code(input: &serde_json::Value, ctx: &ToolContext<'_>) -> R
 
     let working_dir = input["working_dir"]
         .as_str()
-        .map(|s| sam_core::expand_tilde(s))
+        .map(sam_core::expand_tilde)
         .unwrap_or_else(|| "/Volumes/T7/Sam".to_string());
 
     // Ensure working directory exists.
@@ -400,6 +420,130 @@ async fn exec_claude_code(input: &serde_json::Value, ctx: &ToolContext<'_>) -> R
     }
 }
 
+// ── Twitter search ────────────────────────────────────────────────────
+
+/// Load bearer token from the configured source.
+fn load_twitter_bearer(config: &SamConfig) -> Result<String, String> {
+    let source = &config.twitter.bearer_token_source;
+
+    if let Some(var_name) = source.strip_prefix("env:") {
+        return std::env::var(var_name)
+            .map(|k| k.trim().to_string())
+            .map_err(|_| format!("트위터 Bearer 토큰 환경변수 '{var_name}'이 설정되지 않았습니다"));
+    }
+
+    if let Some(file_path) = source.strip_prefix("file:") {
+        let expanded = sam_core::expand_tilde(file_path);
+        return std::fs::read_to_string(&expanded)
+            .map(|k| k.trim().to_string())
+            .map_err(|e| format!("트위터 Bearer 토큰 파일 읽기 실패 '{expanded}': {e}"));
+    }
+
+    Err("트위터 bearer_token_source가 올바르지 않습니다 (env: 또는 file: 접두사 필요)".to_string())
+}
+
+async fn exec_twitter_search(
+    input: &serde_json::Value,
+    ctx: &ToolContext<'_>,
+) -> Result<String, String> {
+    if !ctx.config.twitter.enabled {
+        return Err("트위터 기능이 비활성화되어 있습니다. config.toml에서 [twitter] enabled = true로 설정하세요.".to_string());
+    }
+
+    let query = input["query"]
+        .as_str()
+        .ok_or("missing 'query' parameter")?;
+    let max_results = input["max_results"]
+        .as_u64()
+        .unwrap_or(10)
+        .clamp(10, 100);
+
+    let bearer = load_twitter_bearer(ctx.config)?;
+
+    info!(query = query, max_results = max_results, "twitter_search");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://api.twitter.com/2/tweets/search/recent")
+        .header("authorization", format!("Bearer {bearer}"))
+        .query(&[
+            ("query", query),
+            ("max_results", &max_results.to_string()),
+            ("tweet.fields", "created_at,author_id,public_metrics,lang"),
+            ("expansions", "author_id"),
+            ("user.fields", "username,name"),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("트위터 API 요청 실패: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "<body unreadable>".to_string());
+        return Err(format!("트위터 API 에러 HTTP {status}: {body}"));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("트위터 응답 파싱 실패: {e}"))?;
+
+    // Build username lookup from includes.users.
+    let mut user_map = std::collections::HashMap::new();
+    if let Some(users) = body["includes"]["users"].as_array() {
+        for u in users {
+            if let (Some(id), Some(username), Some(name)) = (
+                u["id"].as_str(),
+                u["username"].as_str(),
+                u["name"].as_str(),
+            ) {
+                user_map.insert(id.to_string(), (username.to_string(), name.to_string()));
+            }
+        }
+    }
+
+    let tweets = body["data"]
+        .as_array()
+        .ok_or("검색 결과가 없습니다.")?;
+
+    if tweets.is_empty() {
+        return Ok("검색 결과가 없습니다.".to_string());
+    }
+
+    let mut result = format!("'{query}' 검색 결과 ({}건):\n\n", tweets.len());
+    for (i, tweet) in tweets.iter().enumerate() {
+        let text = tweet["text"].as_str().unwrap_or("");
+        let author_id = tweet["author_id"].as_str().unwrap_or("unknown");
+        let created = tweet["created_at"].as_str().unwrap_or("");
+
+        let author_display = user_map
+            .get(author_id)
+            .map(|(username, name)| format!("{name} (@{username})"))
+            .unwrap_or_else(|| author_id.to_string());
+
+        let metrics = &tweet["public_metrics"];
+        let likes = metrics["like_count"].as_u64().unwrap_or(0);
+        let retweets = metrics["retweet_count"].as_u64().unwrap_or(0);
+        let replies = metrics["reply_count"].as_u64().unwrap_or(0);
+
+        result.push_str(&format!(
+            "{}. {} ({})\n   {}\n   ❤️ {} 🔁 {} 💬 {}\n\n",
+            i + 1,
+            author_display,
+            created,
+            text.replace('\n', "\n   "),
+            likes,
+            retweets,
+            replies,
+        ));
+    }
+
+    Ok(truncate_output(&result, MAX_OUTPUT_BYTES))
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 fn truncate_output(s: &str, max_bytes: usize) -> String {
@@ -422,7 +566,7 @@ mod tests {
     #[test]
     fn builtin_definitions_are_valid() {
         let defs = builtin_tool_definitions();
-        assert_eq!(defs.len(), 7);
+        assert_eq!(defs.len(), 8);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"memory_recall"));
         assert!(names.contains(&"run_command"));
@@ -507,7 +651,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let config = SamConfig::default();
         let ctx = ToolContext { memory: None, config: &config };
-        let input = json!({"command": "echo hello"});
+        let input = json!({"command": "echo hello", "working_dir": "/tmp"});
         let result = rt.block_on(exec_run_command(&input, &ctx));
         assert!(result.is_ok());
         assert!(result.unwrap().contains("hello"));
