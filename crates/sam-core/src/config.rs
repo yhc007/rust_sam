@@ -25,6 +25,10 @@ pub struct SamConfig {
     #[serde(default)]
     pub notion: NotionConfig,
     #[serde(default)]
+    pub telegram: TelegramConfig,
+    #[serde(default)]
+    pub twitter: TwitterConfig,
+    #[serde(default)]
     pub safety: SafetyConfig,
 }
 
@@ -211,6 +215,37 @@ impl Default for ClaudeCodeConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelegramConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "TelegramConfig::default_token_source")]
+    pub bot_token_source: String,
+    /// Telegram user IDs allowed to chat with Sam (empty = allow all).
+    #[serde(default)]
+    pub allowed_user_ids: Vec<i64>,
+    #[serde(default = "TelegramConfig::default_poll_timeout")]
+    pub poll_timeout_secs: u64,
+}
+
+impl TelegramConfig {
+    fn default_token_source() -> String {
+        "file:~/.sam/telegram_bot_token".to_string()
+    }
+    fn default_poll_timeout() -> u64 { 30 }
+}
+
+impl Default for TelegramConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bot_token_source: Self::default_token_source(),
+            allowed_user_ids: Vec::new(),
+            poll_timeout_secs: Self::default_poll_timeout(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NotionConfig {
     #[serde(default)]
@@ -219,6 +254,29 @@ pub struct NotionConfig {
     pub parent_page_id: String,
     #[serde(default)]
     pub api_key_source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TwitterConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "TwitterConfig::default_bearer_source")]
+    pub bearer_token_source: String,
+}
+
+impl TwitterConfig {
+    fn default_bearer_source() -> String {
+        "file:~/.sam/twitter_bearer".to_string()
+    }
+}
+
+impl Default for TwitterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bearer_token_source: Self::default_bearer_source(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -9,7 +9,7 @@ pub mod paths;
 pub mod tier;
 
 pub use config::{load_config, ClaudeCodeConfig, IMessageConfig, IdentityConfig, LlmConfig,
-    MemoryConfig, NotionConfig, SafetyConfig, SamConfig};
+    MemoryConfig, NotionConfig, SafetyConfig, SamConfig, TelegramConfig, TwitterConfig};
 pub use error::SamError;
 pub use paths::{config_path, expand_tilde, prompts_dir, sam_home, state_dir, tools_dir};
 pub use tier::Tier;
