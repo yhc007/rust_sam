@@ -8,7 +8,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use sam_claude::{
-    load_api_key, load_system_prompt, ConversationSession, SamClaudeClient, TokenBudget,
+    load_api_key, load_system_prompt, ConversationSession, LlmBackend, OpenAiCompatibleClient,
+    SamClaudeClient, TokenBudget,
 };
 use sam_core::{config_path, load_config};
 use sam_memory_adapter::MemoryAdapter;
@@ -42,12 +43,21 @@ pub async fn run() -> i32 {
         }
     };
 
-    let client = match SamClaudeClient::new(api_key, &config.llm) {
-        Ok(c) => Arc::new(c),
-        Err(e) => {
-            eprintln!("HTTP client error: {e}");
-            return 2;
-        }
+    let client: Arc<dyn LlmBackend> = match config.llm.provider.as_str() {
+        "openai-compatible" => match OpenAiCompatibleClient::new(api_key, &config.llm) {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                eprintln!("HTTP client error: {e}");
+                return 2;
+            }
+        },
+        _ => match SamClaudeClient::new(api_key, &config.llm) {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                eprintln!("HTTP client error: {e}");
+                return 2;
+            }
+        },
     };
     let system_prompt = load_system_prompt();
     let max_history = config.llm.max_history;
@@ -66,7 +76,7 @@ pub async fn run() -> i32 {
         }
     };
 
-    info!("Sam daemon started (Claude mode)");
+    info!(provider = %config.llm.provider, model = %config.llm.model, "Sam daemon started");
 
     let cancel = CancellationToken::new();
 
@@ -132,7 +142,7 @@ pub async fn run() -> i32 {
                             });
 
                         let reply = match session.reply(
-                            &router_client,
+                            router_client.as_ref(),
                             &mut budget,
                             &m.text,
                             memory.as_mut(),

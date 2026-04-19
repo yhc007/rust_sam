@@ -182,3 +182,15 @@ impl SamClaudeClient {
         }
     }
 }
+
+#[async_trait::async_trait]
+impl crate::backend::LlmBackend for SamClaudeClient {
+    async fn chat(
+        &self,
+        system: &str,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolDefinition]>,
+    ) -> anyhow::Result<ChatResponse> {
+        SamClaudeClient::chat(self, system, messages, tools).await
+    }
+}

@@ -6,7 +6,7 @@ use tracing::{info, warn};
 use sam_core::SamConfig;
 use sam_memory_adapter::MemoryAdapter;
 
-use crate::api::SamClaudeClient;
+use crate::backend::LlmBackend;
 use crate::budget::TokenBudget;
 use crate::tools::{builtin_tool_definitions, execute_builtin, ToolContext, MAX_TOOL_ROUNDS};
 use crate::types::*;
@@ -45,7 +45,7 @@ impl ConversationSession {
     /// text response (or the loop limit is reached).
     pub async fn reply(
         &mut self,
-        client: &SamClaudeClient,
+        client: &dyn LlmBackend,
         budget: &mut TokenBudget,
         user_text: &str,
         memory: Option<&mut MemoryAdapter>,

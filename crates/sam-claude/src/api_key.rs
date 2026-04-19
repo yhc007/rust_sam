@@ -12,11 +12,15 @@ use tracing::debug;
 ///
 /// The actual key value is **never** included in log or error messages.
 pub fn load_api_key(config: &LlmConfig) -> anyhow::Result<String> {
-    // 1. Try ANTHROPIC_API_KEY env var first.
-    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+    // 1. Try default env var for the provider first.
+    let default_env = match config.provider.as_str() {
+        "openai-compatible" => "OPENAI_API_KEY",
+        _ => "ANTHROPIC_API_KEY",
+    };
+    if let Ok(key) = std::env::var(default_env) {
         let key = key.trim().to_string();
         if !key.is_empty() {
-            debug!("API key loaded from ANTHROPIC_API_KEY env var");
+            debug!("API key loaded from {default_env} env var");
             return Ok(key);
         }
     }
@@ -49,9 +53,19 @@ pub fn load_api_key(config: &LlmConfig) -> anyhow::Result<String> {
         }
     }
 
-    // 4. Nothing found.
+    // 4. For local servers (e.g. vLLM), an API key may not be required.
+    if config.provider == "openai-compatible"
+        && config.base_url.starts_with("http://localhost")
+    {
+        debug!("no API key found for local server, proceeding without one");
+        return Ok(String::new());
+    }
+
+    // 5. Nothing found.
     Err(sam_core::SamError::ApiKeyMissing(
-        "no API key found — set ANTHROPIC_API_KEY or configure api_key_source".to_string(),
+        format!(
+            "no API key found — set {default_env} or configure api_key_source"
+        ),
     )
     .into())
 }
