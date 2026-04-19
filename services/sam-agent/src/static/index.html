@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sam AI</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f0f0f; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
+.header { padding: 16px 24px; background: #1a1a2e; border-bottom: 1px solid #2a2a4a; display: flex; align-items: center; gap: 12px; }
+.header h1 { font-size: 20px; font-weight: 600; color: #fff; }
+.header .status { font-size: 12px; color: #888; }
+.header .mem-btn { margin-left: auto; padding: 6px 14px; background: #2a2a4a; border: 1px solid #3a3a5a; border-radius: 6px; color: #aaa; cursor: pointer; font-size: 12px; }
+.header .mem-btn:hover { background: #3a3a5a; color: #fff; }
+.chat { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+.msg { max-width: 80%; padding: 12px 16px; border-radius: 12px; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; font-size: 14px; }
+.msg.user { align-self: flex-end; background: #1e3a5f; color: #e0e8f0; border-bottom-right-radius: 4px; }
+.msg.sam { align-self: flex-start; background: #1a1a2e; color: #d0d0e0; border-bottom-left-radius: 4px; border: 1px solid #2a2a4a; }
+.msg.system { align-self: center; background: transparent; color: #666; font-size: 12px; font-style: italic; }
+.typing { align-self: flex-start; padding: 12px 16px; color: #888; font-size: 14px; }
+.typing::after { content: '...'; animation: dots 1.5s infinite; }
+@keyframes dots { 0%,20% { content: '.'; } 40% { content: '..'; } 60%,100% { content: '...'; } }
+.input-area { padding: 16px 24px; background: #1a1a2e; border-top: 1px solid #2a2a4a; }
+.input-row { display: flex; gap: 8px; max-width: 900px; margin: 0 auto; }
+.input-row input { flex: 1; padding: 12px 16px; background: #0f0f1f; border: 1px solid #2a2a4a; border-radius: 8px; color: #e0e0e0; font-size: 14px; outline: none; }
+.input-row input:focus { border-color: #4a4a8a; }
+.input-row button { padding: 12px 20px; background: #3a3aaa; border: none; border-radius: 8px; color: #fff; cursor: pointer; font-size: 14px; font-weight: 500; }
+.input-row button:hover { background: #4a4abb; }
+.input-row button:disabled { background: #2a2a4a; color: #666; cursor: not-allowed; }
+.modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); z-index: 10; justify-content: center; align-items: center; }
+.modal.show { display: flex; }
+.modal-content { background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 12px; padding: 24px; min-width: 320px; }
+.modal-content h2 { margin-bottom: 16px; font-size: 16px; }
+.modal-content .stat { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #2a2a4a; font-size: 13px; }
+.modal-content .close { margin-top: 16px; padding: 8px 16px; background: #2a2a4a; border: 1px solid #3a3a5a; border-radius: 6px; color: #ccc; cursor: pointer; }
+.modal-content .dream-btn { margin-top: 8px; padding: 8px 16px; background: #3a3a8a; border: none; border-radius: 6px; color: #fff; cursor: pointer; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Sam AI</h1>
+  <span class="status">Powered by Grok + Claude Code</span>
+  <button class="mem-btn" onclick="showMemory()">Memory</button>
+</div>
+
+<div class="chat" id="chat">
+  <div class="msg system">Sam AI ready. Type a message to start.</div>
+</div>
+
+<div class="input-area">
+  <div class="input-row">
+    <input type="text" id="input" placeholder="메시지를 입력하세요..." autocomplete="off" />
+    <button id="send" onclick="sendMessage()">Send</button>
+  </div>
+</div>
+
+<div class="modal" id="memModal">
+  <div class="modal-content">
+    <h2>Memory-Brain</h2>
+    <div id="memStats"></div>
+    <button class="dream-btn" onclick="runDream()">Run Dream Consolidation</button>
+    <button class="close" onclick="closeMemory()">Close</button>
+  </div>
+</div>
+
+<script>
+const chat = document.getElementById('chat');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+let sending = false;
+
+input.addEventListener('keydown', e => { if (e.key === 'Enter' && !sending) sendMessage(); });
+
+async function sendMessage() {
+  const text = input.value.trim();
+  if (!text || sending) return;
+  sending = true;
+  sendBtn.disabled = true;
+  input.value = '';
+
+  addMsg('user', text);
+  const typing = document.createElement('div');
+  typing.className = 'typing';
+  typing.textContent = 'Sam is thinking';
+  chat.appendChild(typing);
+  chat.scrollTop = chat.scrollHeight;
+
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text })
+    });
+    const data = await res.json();
+    typing.remove();
+    addMsg('sam', data.reply);
+  } catch (e) {
+    typing.remove();
+    addMsg('sam', 'Error: ' + e.message);
+  }
+  sending = false;
+  sendBtn.disabled = false;
+  input.focus();
+}
+
+function addMsg(role, text) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  div.textContent = text;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+async function showMemory() {
+  try {
+    const res = await fetch('/api/memory');
+    const s = await res.json();
+    document.getElementById('memStats').innerHTML =
+      `<div class="stat"><span>Memories</span><span>${s.total_memories}</span></div>` +
+      `<div class="stat"><span>Concepts</span><span>${s.total_concepts}</span></div>` +
+      `<div class="stat"><span>Hippocampus</span><span>${s.hippocampus_active ? 'Active' : 'Off'}</span></div>` +
+      `<div class="stat"><span>Neocortex</span><span>${s.neocortex_active ? 'Active' : 'Off'}</span></div>` +
+      `<div class="stat"><span>Dream</span><span>${s.dream_active ? 'Running' : 'Idle'}</span></div>`;
+  } catch (e) {
+    document.getElementById('memStats').innerHTML = '<div class="stat">Error loading stats</div>';
+  }
+  document.getElementById('memModal').classList.add('show');
+}
+
+function closeMemory() { document.getElementById('memModal').classList.remove('show'); }
+
+async function runDream() {
+  try {
+    const res = await fetch('/api/dream', { method: 'POST' });
+    const data = await res.json();
+    alert(data.result || data.error);
+    showMemory();
+  } catch (e) { alert('Error: ' + e.message); }
+}
+</script>
+</body>
+</html>

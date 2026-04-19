@@ -32,6 +32,9 @@ async fn main() -> Result<()> {
             0
         }
         Command::Daemon => cmd::daemon::run().await,
+        Command::Chat => cmd::chat::run().await,
+        Command::Telegram => cmd::telegram::run().await,
+        Command::Web { port } => cmd::web::run(port).await,
         Command::Reload => cmd::reload::run(),
         Command::Send { handle, text } => cmd::send::run(handle, text).await,
         Command::ImportMemories { file } => cmd::import_memories::run(file).await,

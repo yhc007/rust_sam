@@ -32,6 +32,19 @@ pub enum Command {
     /// Run Sam as a long-lived daemon.
     Daemon,
 
+    /// Interactive CLI chat with Sam.
+    Chat,
+
+    /// Run Sam as a Telegram bot.
+    Telegram,
+
+    /// Run Sam as a web server.
+    Web {
+        /// Port to listen on (default: 3000).
+        #[arg(short, long, default_value = "3000")]
+        port: u16,
+    },
+
     /// Signal a running Sam to reload config/prompts. Stub in M1.
     Reload,
 

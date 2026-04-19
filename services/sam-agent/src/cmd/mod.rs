@@ -1,8 +1,11 @@
 //! Subcommand implementations.
 
+pub mod chat;
 pub mod daemon;
 pub mod import_memories;
 pub mod reload;
 pub mod send;
 pub mod status;
+pub mod telegram;
 pub mod version;
+pub mod web;
