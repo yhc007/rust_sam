@@ -31,7 +31,7 @@ toml = "0.8"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
 # Database
-rusqlite = { version = "0.31", default-features = false }
+rusqlite = { version = "0.31", default-features = false, features = ["bundled"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
