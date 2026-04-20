@@ -187,7 +187,7 @@ pub struct ClaudeCodeConfig {
 
 impl ClaudeCodeConfig {
     fn default_binary() -> String { "/usr/local/bin/claude".to_string() }
-    fn default_mode() -> String { "plan".to_string() }
+    fn default_mode() -> String { "bypassPermissions".to_string() }
     fn default_root() -> String { "~/.sam/sessions".to_string() }
     fn default_timeout() -> u64 { 7200 }
     fn default_cost() -> u64 { 100 }

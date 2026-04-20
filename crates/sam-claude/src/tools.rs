@@ -385,6 +385,8 @@ async fn exec_claude_code(input: &serde_json::Value, ctx: &ToolContext<'_>) -> R
             .arg("text")
             .arg("--max-turns")
             .arg("20")
+            .arg("--permission-mode")
+            .arg(&cc.default_permission_mode)
             .arg(prompt)
             .current_dir(&working_dir)
             .env("CLAUDE_CODE_ENTRYPOINT", "sam-agent")
