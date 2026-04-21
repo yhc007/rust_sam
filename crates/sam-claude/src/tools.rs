@@ -377,6 +377,8 @@ async fn exec_claude_code(input: &serde_json::Value, ctx: &ToolContext<'_>) -> R
         "launching Claude Code"
     );
 
+    let max_turns = cc.max_turns.to_string();
+
     let result = tokio::time::timeout(
         Duration::from_secs(timeout_secs),
         Command::new(&binary)
@@ -384,7 +386,7 @@ async fn exec_claude_code(input: &serde_json::Value, ctx: &ToolContext<'_>) -> R
             .arg("--output-format")
             .arg("text")
             .arg("--max-turns")
-            .arg("20")
+            .arg(&max_turns)
             .arg("--permission-mode")
             .arg(&cc.default_permission_mode)
             .arg(prompt)
@@ -399,6 +401,19 @@ async fn exec_claude_code(input: &serde_json::Value, ctx: &ToolContext<'_>) -> R
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let code = output.status.code().unwrap_or(-1);
+
+            // Detect the max-turns cap hit: Claude Code emits
+            // "Error: Reached max turns (N)" to stdout and exits non-zero.
+            // Surface it as a structured error so the LLM can react
+            // instead of treating it like a normal reply.
+            if code != 0 && stdout.contains("Reached max turns") {
+                warn!(max_turns = cc.max_turns, "Claude Code hit max-turns cap");
+                return Err(format!(
+                    "Claude Code가 {turn}턴 한도에 도달했습니다. 작업이 완료되지 않았을 수 있으니 범위를 좁혀 다시 시도하거나 `[claude_code] max_turns` 값을 올리세요. 원본 출력: {out}",
+                    turn = cc.max_turns,
+                    out = truncate_output(&stdout, MAX_OUTPUT_BYTES / 4),
+                ));
+            }
 
             if code != 0 {
                 warn!(code = code, "Claude Code exited with error");

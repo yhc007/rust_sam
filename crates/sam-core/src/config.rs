@@ -183,6 +183,8 @@ pub struct ClaudeCodeConfig {
     pub hard_timeout_secs: u64,
     #[serde(default = "ClaudeCodeConfig::default_cost")]
     pub hard_cost_usd: u64,
+    #[serde(default = "ClaudeCodeConfig::default_max_turns")]
+    pub max_turns: u32,
 }
 
 impl ClaudeCodeConfig {
@@ -191,6 +193,7 @@ impl ClaudeCodeConfig {
     fn default_root() -> String { "~/.sam/sessions".to_string() }
     fn default_timeout() -> u64 { 7200 }
     fn default_cost() -> u64 { 100 }
+    fn default_max_turns() -> u32 { 80 }
 
     /// Resolved binary path (tilde expanded).
     pub fn resolved_binary(&self) -> PathBuf {
@@ -211,6 +214,7 @@ impl Default for ClaudeCodeConfig {
             session_root: Self::default_root(),
             hard_timeout_secs: Self::default_timeout(),
             hard_cost_usd: Self::default_cost(),
+            max_turns: Self::default_max_turns(),
         }
     }
 }
