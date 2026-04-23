@@ -2,9 +2,11 @@
 
 use std::time::Duration;
 
+use async_trait::async_trait;
 use reqwest::Client;
 use tracing::{info, warn};
 
+use crate::llm_client::LlmClient;
 use crate::types::*;
 
 /// Lightweight Claude API client tailored for Sam.
@@ -40,14 +42,8 @@ impl SamClaudeClient {
         })
     }
 
-    /// Send a chat request to the Claude Messages API.
-    ///
-    /// `system` is passed as the top-level system prompt. `messages` contains
-    /// the conversation history. `tools` optionally provides tool definitions
-    /// for Claude's tool_use feature.
-    ///
-    /// Retries on 429 and 5xx with exponential backoff (base 1s).
-    pub async fn chat(
+    /// Internal chat implementation shared between direct calls and trait impl.
+    async fn chat_impl(
         &self,
         system: &str,
         messages: &[ChatMessage],
@@ -183,14 +179,14 @@ impl SamClaudeClient {
     }
 }
 
-#[async_trait::async_trait]
-impl crate::backend::LlmBackend for SamClaudeClient {
+#[async_trait]
+impl LlmClient for SamClaudeClient {
     async fn chat(
         &self,
         system: &str,
         messages: &[ChatMessage],
         tools: Option<&[ToolDefinition]>,
     ) -> anyhow::Result<ChatResponse> {
-        SamClaudeClient::chat(self, system, messages, tools).await
+        self.chat_impl(system, messages, tools).await
     }
 }

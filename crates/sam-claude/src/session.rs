@@ -6,8 +6,8 @@ use tracing::{info, warn};
 use sam_core::SamConfig;
 use sam_memory_adapter::MemoryAdapter;
 
-use crate::backend::LlmBackend;
 use crate::budget::TokenBudget;
+use crate::llm_client::LlmClient;
 use crate::tools::{builtin_tool_definitions, execute_builtin, ToolContext, MAX_TOOL_ROUNDS};
 use crate::types::*;
 
@@ -45,12 +45,15 @@ impl ConversationSession {
     /// text response (or the loop limit is reached).
     pub async fn reply(
         &mut self,
-        client: &dyn LlmBackend,
+        client: &dyn LlmClient,
         budget: &mut TokenBudget,
         user_text: &str,
         memory: Option<&mut MemoryAdapter>,
         config: &SamConfig,
     ) -> anyhow::Result<String> {
+        // Trim history *before* adding the new message to prevent unbounded growth.
+        self.trim_history();
+
         // Append user message.
         self.history.push(ChatMessage::text("user", user_text));
 
@@ -61,13 +64,22 @@ impl ConversationSession {
         let mut mem_opt = memory;
 
         for round in 0..MAX_TOOL_ROUNDS {
-            let resp = client
+            let resp = match client
                 .chat(
                     &self.system_prompt,
                     &self.history,
                     Some(tools_slice),
                 )
-                .await?;
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    // On API error, remove the user message we just added
+                    // so the history doesn't grow unboundedly with failed turns.
+                    self.history.pop();
+                    return Err(e);
+                }
+            };
 
             total_input += resp.input_tokens;
             total_output += resp.output_tokens;
@@ -163,10 +175,35 @@ impl ConversationSession {
     }
 
     /// Remove oldest messages to stay within `max_history`.
+    ///
+    /// After trimming, ensures the history doesn't start with orphaned
+    /// tool_result or assistant tool_use messages (which would cause Claude
+    /// API errors due to missing tool_use/tool_result pairs).
     fn trim_history(&mut self) {
         if self.history.len() > self.max_history {
             let excess = self.history.len() - self.max_history;
             self.history.drain(..excess);
+        }
+
+        // Drop leading messages until we start with a clean user text or
+        // assistant text message (not a tool_result or tool_use block).
+        while !self.history.is_empty() && self.is_tool_message(0) {
+            self.history.remove(0);
+        }
+    }
+
+    /// Check if the message at `index` is a tool-related message
+    /// (tool_result from user, or assistant message containing tool_use blocks).
+    fn is_tool_message(&self, index: usize) -> bool {
+        let msg = &self.history[index];
+        match &msg.content {
+            MessageContent::Text(_) => false,
+            MessageContent::Blocks(blocks) => blocks.iter().any(|b| {
+                matches!(
+                    b,
+                    ContentBlock::ToolResult { .. } | ContentBlock::ToolUse { .. }
+                )
+            }),
         }
     }
 
@@ -204,6 +241,41 @@ mod tests {
         match &session.history[3].content {
             MessageContent::Text(s) => assert_eq!(s, "message 5"),
             _ => panic!("expected text"),
+        }
+    }
+
+    #[test]
+    fn trim_drops_orphaned_tool_messages() {
+        let mut session = ConversationSession::new(
+            "+821012345678",
+            "system prompt".to_string(),
+            4,
+        );
+
+        // Simulate: user, assistant(tool_use), user(tool_result), assistant(text), user, assistant
+        session.history.push(ChatMessage::text("user", "msg 0"));
+        session.history.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                id: "toolu_01".to_string(),
+                name: "current_time".to_string(),
+                input: serde_json::json!({}),
+            }]),
+        });
+        session.history.push(ChatMessage::tool_result("toolu_01", "12:00", false));
+        session.history.push(ChatMessage::text("assistant", "It's noon"));
+        session.history.push(ChatMessage::text("user", "msg 4"));
+        session.history.push(ChatMessage::text("assistant", "msg 5"));
+
+        // max_history = 4, so naive trim would remove first 2,
+        // leaving tool_result at front → API error.
+        session.trim_history();
+
+        // Should have dropped the orphaned tool_result too.
+        assert!(!session.history.is_empty());
+        match &session.history[0].content {
+            MessageContent::Text(s) => assert_eq!(s, "It's noon"),
+            _ => panic!("first message should be clean text, got: {:?}", session.history[0]),
         }
     }
 }

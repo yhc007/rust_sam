@@ -1,20 +1,21 @@
-//! sam-claude — Claude API client and conversation management for Sam.
+//! sam-claude — LLM API client and conversation management for Sam.
 //!
-//! M1 provided the [`probe::claude_version`] health check and [`cli::ClaudeCli`]
-//! stub. M3 adds the direct Claude Messages API integration: client, types,
-//! API key loading, token budget tracking, and session management.
+//! Supports multiple LLM providers (Anthropic Claude, xAI Grok) via the
+//! [`LlmClient`] trait. Provider selection is driven by `config.llm.provider`.
 
 pub mod api;
 pub mod api_key;
 pub mod backend;
 pub mod budget;
 pub mod cli;
+pub mod llm_client;
 pub mod openai_client;
 pub mod probe;
 pub mod prompt;
 pub mod session;
 pub mod tools;
 pub mod types;
+pub mod xai;
 
 // ── Re-exports ──────────────────────────────────────────────────────────
 
@@ -23,8 +24,10 @@ pub use api_key::load_api_key;
 pub use backend::LlmBackend;
 pub use budget::TokenBudget;
 pub use cli::{ClaudeCli, ClaudeSpawnRequest};
+pub use llm_client::LlmClient;
 pub use openai_client::OpenAiCompatibleClient;
 pub use probe::claude_version;
 pub use prompt::load_system_prompt;
 pub use session::ConversationSession;
 pub use types::{ChatMessage, ChatResponse};
+pub use xai::XaiClient;

@@ -1,26 +1,33 @@
-//! API key loading for the Claude API.
+//! API key loading — supports multiple LLM providers.
 
 use sam_core::LlmConfig;
 use tracing::debug;
 
-/// Load the Anthropic API key using the following resolution order:
+/// Default environment variable names per provider.
+fn default_env_var(provider: &str) -> &str {
+    match provider {
+        "xai" => "XAI_API_KEY",
+        "openai-compatible" => "OPENAI_API_KEY",
+        _ => "ANTHROPIC_API_KEY",
+    }
+}
+
+/// Load the LLM API key using the following resolution order:
 ///
-/// 1. `ANTHROPIC_API_KEY` environment variable
+/// 1. Provider-specific environment variable (e.g. `XAI_API_KEY`, `ANTHROPIC_API_KEY`)
 /// 2. `config.api_key_source` starting with `env:` — read that env var
 /// 3. `config.api_key_source` starting with `file:` — read that file
 /// 4. Otherwise return an error
 ///
 /// The actual key value is **never** included in log or error messages.
 pub fn load_api_key(config: &LlmConfig) -> anyhow::Result<String> {
-    // 1. Try default env var for the provider first.
-    let default_env = match config.provider.as_str() {
-        "openai-compatible" => "OPENAI_API_KEY",
-        _ => "ANTHROPIC_API_KEY",
-    };
-    if let Ok(key) = std::env::var(default_env) {
+    let default_var = default_env_var(&config.provider);
+
+    // 1. Try provider-default env var first.
+    if let Ok(key) = std::env::var(default_var) {
         let key = key.trim().to_string();
         if !key.is_empty() {
-            debug!("API key loaded from {default_env} env var");
+            debug!("API key loaded from {default_var} env var");
             return Ok(key);
         }
     }
@@ -63,9 +70,7 @@ pub fn load_api_key(config: &LlmConfig) -> anyhow::Result<String> {
 
     // 5. Nothing found.
     Err(sam_core::SamError::ApiKeyMissing(
-        format!(
-            "no API key found — set {default_env} or configure api_key_source"
-        ),
+        format!("no API key found — set {default_var} or configure api_key_source"),
     )
     .into())
 }

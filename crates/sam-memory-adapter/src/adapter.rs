@@ -55,6 +55,8 @@ impl MemoryAdapter {
     pub fn from_config(config: &MemoryConfig) -> Result<Self> {
         let hippo_config = HippocampusConfig {
             embedding_url: Some(config.embedder_url.clone()),
+            vecdb_url: Some("http://localhost:3100".to_string()),
+            collection: "memory_actor".to_string(),
             ..HippocampusConfig::default()
         };
         let sys_config = MemorySystemConfig {
@@ -63,6 +65,7 @@ impl MemoryAdapter {
         };
         info!(
             embedder_url = %config.embedder_url,
+            vecdb_url = "http://localhost:3100",
             "MemoryAdapter initialising"
         );
         let mut adapter = Self::new(sys_config)?;

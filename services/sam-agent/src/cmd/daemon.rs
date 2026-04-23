@@ -1,6 +1,6 @@
 //! `sam daemon` — long-running iMessage agent backed by Claude API.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -9,7 +9,7 @@ use tracing::{error, info, warn};
 
 use sam_claude::{
     load_api_key, load_system_prompt, ConversationSession, LlmBackend, OpenAiCompatibleClient,
-    SamClaudeClient, TokenBudget,
+    SamClaudeClient, TokenBudget, XaiClient,
 };
 use sam_core::{config_path, load_config};
 use sam_memory_adapter::MemoryAdapter;
@@ -44,6 +44,13 @@ pub async fn run() -> i32 {
     };
 
     let client: Arc<dyn LlmBackend> = match config.llm.provider.as_str() {
+        "xai" => match XaiClient::new(api_key, &config.llm) {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                eprintln!("HTTP client error: {e}");
+                return 2;
+            }
+        },
         "openai-compatible" => match OpenAiCompatibleClient::new(api_key, &config.llm) {
             Ok(c) => Arc::new(c),
             Err(e) => {
@@ -109,29 +116,53 @@ pub async fn run() -> i32 {
     let router_config = config.clone();
     let router_handle = tokio::spawn(async move {
         let mut sessions: HashMap<String, ConversationSession> = HashMap::new();
-        // Dedup set: tracks texts we sent so we can skip the echo copies
-        // that chat.db records as is_from_me=0 (same Apple ID, cross-device sync).
-        let mut sent_texts: HashSet<String> = HashSet::new();
+        // Dedup map: tracks texts we sent + when, so we can skip echo copies.
+        // Entries expire after SENT_TEXT_TTL to prevent unbounded growth.
+        let mut sent_texts: HashMap<String, std::time::Instant> = HashMap::new();
+        const SENT_TEXT_TTL_SECS: u64 = 120;
+        // Track consecutive errors per handle — reset session after too many.
+        let mut consecutive_errors: HashMap<String, u32> = HashMap::new();
+        const MAX_CONSECUTIVE_ERRORS: u32 = 3;
+        // Cooldown: timestamp of last reply sent per handle.
+        // Ignore incoming messages within ECHO_COOLDOWN_MS of our last reply.
+        let mut last_reply_time: HashMap<String, std::time::Instant> = HashMap::new();
+        const ECHO_COOLDOWN_MS: u64 = 3000;
 
         loop {
             tokio::select! {
                 _ = router_cancel.cancelled() => break,
                 msg = inbound_rx.recv() => match msg {
                     Some(m) => {
+                        // Cooldown: skip messages arriving too soon after
+                        // we sent a reply — they are almost certainly echoes
+                        // of our own messages seen by chat.db.
+                        if let Some(t) = last_reply_time.get(&m.sender) {
+                            if t.elapsed() < std::time::Duration::from_millis(ECHO_COOLDOWN_MS) {
+                                info!(
+                                    sender = %m.sender,
+                                    rowid = m.rowid,
+                                    "skipping message during echo cooldown"
+                                );
+                                continue;
+                            }
+                        }
+
                         // Skip messages that are echoes of our own replies.
                         // AppleScript `return` inserts \r, so we normalise
                         // before comparison.
                         let normalised = normalize_for_dedup(&m.text);
-                        if sent_texts.remove(&normalised) {
-                            info!(
-                                sender = %m.sender,
-                                rowid = m.rowid,
-                                "skipping echo of own reply"
-                            );
-                            continue;
+                        if let Some(ts) = sent_texts.get(&normalised) {
+                            if ts.elapsed().as_secs() < SENT_TEXT_TTL_SECS {
+                                info!(
+                                    sender = %m.sender,
+                                    rowid = m.rowid,
+                                    "skipping echo of own reply"
+                                );
+                                continue;
+                            }
                         }
 
-                        let session = sessions
+                        sessions
                             .entry(m.sender.clone())
                             .or_insert_with(|| {
                                 ConversationSession::new(
@@ -141,6 +172,28 @@ pub async fn run() -> i32 {
                                 )
                             });
 
+                        // Check if this handle has too many consecutive errors.
+                        let err_count = consecutive_errors.get(&m.sender).copied().unwrap_or(0);
+                        if err_count >= MAX_CONSECUTIVE_ERRORS {
+                            warn!(
+                                sender = %m.sender,
+                                errors = err_count,
+                                "too many consecutive errors, resetting session"
+                            );
+                            sessions.remove(&m.sender);
+                            consecutive_errors.remove(&m.sender);
+                        }
+
+                        // Ensure session exists (may have been removed above).
+                        sessions.entry(m.sender.clone()).or_insert_with(|| {
+                            ConversationSession::new(
+                                &m.sender,
+                                system_prompt.clone(),
+                                max_history,
+                            )
+                        });
+                        let session = sessions.get_mut(&m.sender).unwrap();
+
                         let reply = match session.reply(
                             router_client.as_ref(),
                             &mut budget,
@@ -148,9 +201,25 @@ pub async fn run() -> i32 {
                             memory.as_mut(),
                             &router_config,
                         ).await {
-                            Ok(text) => text,
+                            Ok(text) => {
+                                consecutive_errors.remove(&m.sender);
+                                text
+                            }
                             Err(e) => {
-                                error!(sender = %m.sender, "Claude error: {e}");
+                                let count = consecutive_errors
+                                    .entry(m.sender.clone())
+                                    .or_insert(0);
+                                *count += 1;
+                                error!(
+                                    sender = %m.sender,
+                                    consecutive = *count,
+                                    "LLM error: {e}"
+                                );
+                                if *count >= MAX_CONSECUTIVE_ERRORS {
+                                    // Don't send error message to avoid echo loop.
+                                    // Session will be reset on next incoming message.
+                                    continue;
+                                }
                                 format!("⚠️ 오류가 발생했어: {e}")
                             }
                         };
@@ -164,14 +233,13 @@ pub async fn run() -> i32 {
 
                         // Split long messages for readability.
                         let parts = split_message(&reply, MSG_SPLIT_LEN);
+                        let now = std::time::Instant::now();
                         for part in &parts {
                             // Remember what we sent so we can filter the echo.
-                            sent_texts.insert(normalize_for_dedup(part));
+                            sent_texts.insert(normalize_for_dedup(part), now);
                         }
-                        // Prevent unbounded growth.
-                        if sent_texts.len() > 200 {
-                            sent_texts.clear();
-                        }
+                        // Evict expired entries to prevent unbounded growth.
+                        sent_texts.retain(|_, ts| ts.elapsed().as_secs() < SENT_TEXT_TTL_SECS);
                         for part in parts {
                             let out = OutgoingMessage {
                                 handle: m.sender.clone(),
@@ -181,6 +249,8 @@ pub async fn run() -> i32 {
                                 return;
                             }
                         }
+                        // Record when we last sent a reply to this handle.
+                        last_reply_time.insert(m.sender.clone(), std::time::Instant::now());
                     }
                     None => break,
                 }
@@ -206,7 +276,11 @@ pub async fn run() -> i32 {
 /// Normalise text for echo dedup: AppleScript's `return` is `\r`, but our
 /// outbound text uses `\n`. Collapse both to `\n` so they compare equal.
 fn normalize_for_dedup(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\r', "\n")
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim()
+        .trim_end_matches(|c: char| c.is_ascii_punctuation() || c == '!' || c == '？' || c == '！')
+        .to_string()
 }
 
 /// Split a message into chunks of at most `max_len` *characters*, preferring
