@@ -594,6 +594,13 @@ pub async fn run() -> i32 {
                         }
 
                         // Slash command interception — handle locally without LLM.
+                        if user_text.starts_with('/') {
+                            tracing::debug!(
+                                text = %user_text,
+                                bytes = ?user_text.as_bytes().iter().take(20).collect::<Vec<_>>(),
+                                "slash command candidate"
+                            );
+                        }
                         let slash_result = super::slash_commands::try_handle(
                             &user_text,
                             &router_config,
@@ -709,6 +716,12 @@ pub async fn run() -> i32 {
                             continue;
                         }
 
+                        tracing::debug!(
+                            handle = %m.sender,
+                            tools = session.tool_count(),
+                            history = session.history().len(),
+                            "dispatching to LLM"
+                        );
                         let reply = match session.reply(
                             router_client.as_ref(),
                             &mut budget,

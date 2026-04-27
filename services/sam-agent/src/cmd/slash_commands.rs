@@ -30,7 +30,15 @@ pub async fn try_handle(
     skill_store: Option<&Arc<Mutex<SkillStore>>>,
     plugin_store: Option<&Arc<Mutex<PluginStore>>>,
 ) -> SlashResult {
-    let trimmed = text.trim();
+    // Strip invisible Unicode characters (BOM, zero-width spaces, etc.)
+    // and normalize smart punctuation that iMessage may inject.
+    let cleaned: String = text
+        .trim()
+        .replace(['\u{FEFF}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}'], "")
+        .replace('\u{FF0F}', "/")  // fullwidth solidus ／
+        .trim()
+        .to_string();
+    let trimmed = cleaned.as_str();
 
     // Must start with '/'
     if !trimmed.starts_with('/') {

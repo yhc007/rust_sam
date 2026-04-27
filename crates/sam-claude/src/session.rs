@@ -720,6 +720,11 @@ impl ConversationSession {
         &self.history
     }
 
+    /// Number of tool definitions registered in this session.
+    pub fn tool_count(&self) -> usize {
+        self.tools.len()
+    }
+
     /// Add extra tool definitions (e.g. from MCP servers) to this session.
     pub fn add_tools(&mut self, extra: Vec<ToolDefinition>) {
         self.tools.extend(extra);
