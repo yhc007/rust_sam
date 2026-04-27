@@ -1,9 +1,12 @@
 //! Conversation session — manages history, budget, and Claude round-trips
 //! with tool_use support.
 
+use std::sync::Arc;
+
+use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use sam_core::SamConfig;
+use sam_core::{CronStore, SamConfig};
 use sam_memory_adapter::MemoryAdapter;
 
 use crate::budget::TokenBudget;
@@ -24,6 +27,8 @@ pub struct ConversationSession {
     system_prompt: String,
     /// Tool definitions sent with every API call.
     tools: Vec<ToolDefinition>,
+    /// Rolling summary of dropped conversation history (context compaction).
+    context_summary: Option<String>,
 }
 
 impl ConversationSession {
@@ -35,6 +40,7 @@ impl ConversationSession {
             max_history,
             system_prompt,
             tools: builtin_tool_definitions(),
+            context_summary: None,
         }
     }
 
@@ -50,12 +56,20 @@ impl ConversationSession {
         user_text: &str,
         memory: Option<&mut MemoryAdapter>,
         config: &SamConfig,
+        cron_store: Option<Arc<Mutex<CronStore>>>,
     ) -> anyhow::Result<String> {
         // Trim history *before* adding the new message to prevent unbounded growth.
-        self.trim_history();
+        // Compact dropped messages into context_summary.
+        let dropped = self.trim_history();
+        if !dropped.is_empty() {
+            self.compact(client, &dropped).await;
+        }
 
         // Append user message.
         self.history.push(ChatMessage::text("user", user_text));
+
+        // Build effective system prompt (base + context summary).
+        let effective_system = self.effective_system_prompt();
 
         let tools_slice = &self.tools;
         let mut total_input = 0u32;
@@ -66,7 +80,7 @@ impl ConversationSession {
         for round in 0..MAX_TOOL_ROUNDS {
             let resp = match client
                 .chat(
-                    &self.system_prompt,
+                    &effective_system,
                     &self.history,
                     Some(tools_slice),
                 )
@@ -115,6 +129,8 @@ impl ConversationSession {
                     let mut ctx = ToolContext {
                         memory: mem_opt.as_deref_mut(),
                         config,
+                        cron_store: cron_store.clone(),
+                        sender_handle: self.handle.clone(),
                     };
                     let result = execute_builtin(&tc.name, &tc.input, &mut ctx).await;
                     let (result_text, is_error) = match result {
@@ -174,22 +190,98 @@ impl ConversationSession {
         Ok("도구 호출 한도에 도달했어. 다시 시도해줘.".to_string())
     }
 
+    /// Build effective system prompt including context summary.
+    fn effective_system_prompt(&self) -> String {
+        match &self.context_summary {
+            Some(summary) => format!(
+                "{}\n\n[이전 대화 요약]\n{}",
+                self.system_prompt, summary
+            ),
+            None => self.system_prompt.clone(),
+        }
+    }
+
+    /// Summarize dropped messages into the rolling context_summary.
+    async fn compact(&mut self, client: &dyn LlmClient, dropped: &[ChatMessage]) {
+        // Format dropped messages as text.
+        let mut text = String::new();
+        for msg in dropped {
+            let role = &msg.role;
+            let content = match &msg.content {
+                MessageContent::Text(s) => s.clone(),
+                MessageContent::Blocks(blocks) => {
+                    blocks.iter().filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    }).collect::<Vec<_>>().join(" ")
+                }
+            };
+            if !content.is_empty() {
+                text.push_str(&format!("[{role}] {content}\n"));
+            }
+        }
+
+        if text.is_empty() {
+            return;
+        }
+
+        // Build summarization request (no tools, short).
+        let summarize_prompt = "다음 대화를 3-5문장으로 요약해. 핵심 사실, 결정사항, 맥락만 간결하게. 요약만 출력하고 다른 말은 하지 마.";
+        let messages = vec![
+            ChatMessage::text("user", &format!("{summarize_prompt}\n\n---\n{text}")),
+        ];
+
+        match client.chat(
+            "You are a concise summarizer. Output only the summary.",
+            &messages,
+            None,
+        ).await {
+            Ok(resp) => {
+                let new_summary = resp.text.trim().to_string();
+                if !new_summary.is_empty() {
+                    // Merge with existing summary (keep last 500 chars of old + new).
+                    self.context_summary = Some(match &self.context_summary {
+                        Some(existing) => {
+                            let combined = format!("{existing}\n{new_summary}");
+                            // Cap at ~800 chars to avoid bloating the system prompt.
+                            if combined.chars().count() > 800 {
+                                combined.chars().skip(combined.chars().count() - 800).collect()
+                            } else {
+                                combined
+                            }
+                        }
+                        None => new_summary,
+                    });
+                    info!(handle = %self.handle, "context compaction done");
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "context compaction failed, continuing without summary");
+            }
+        }
+    }
+
     /// Remove oldest messages to stay within `max_history`.
+    /// Returns the dropped messages for potential compaction.
     ///
     /// After trimming, ensures the history doesn't start with orphaned
     /// tool_result or assistant tool_use messages (which would cause Claude
     /// API errors due to missing tool_use/tool_result pairs).
-    fn trim_history(&mut self) {
+    fn trim_history(&mut self) -> Vec<ChatMessage> {
+        let mut dropped = Vec::new();
+
         if self.history.len() > self.max_history {
             let excess = self.history.len() - self.max_history;
-            self.history.drain(..excess);
+            dropped = self.history.drain(..excess).collect();
         }
 
         // Drop leading messages until we start with a clean user text or
         // assistant text message (not a tool_result or tool_use block).
         while !self.history.is_empty() && self.is_tool_message(0) {
-            self.history.remove(0);
+            dropped.push(self.history.remove(0));
         }
+
+        dropped
     }
 
     /// Check if the message at `index` is a tool-related message

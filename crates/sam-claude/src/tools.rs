@@ -1,16 +1,20 @@
 //! Built-in tools for Sam's Claude tool_use integration.
 //!
 //! Tools: memory_recall, memory_store, current_time, run_command,
-//! read_file, write_file, claude_code, twitter_search.
+//! read_file, write_file, claude_code, twitter_search,
+//! schedule_reminder, list_reminders, cancel_reminder.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::TimeZone;
 use serde_json::json;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use sam_core::SamConfig;
+use sam_core::{CronSchedule, CronStore, SamConfig, new_job, parse_datetime_to_unix};
 use sam_memory_adapter::MemoryAdapter;
 
 use crate::types::ToolDefinition;
@@ -25,6 +29,9 @@ const MAX_OUTPUT_BYTES: usize = 8_000;
 pub struct ToolContext<'a> {
     pub memory: Option<&'a mut MemoryAdapter>,
     pub config: &'a SamConfig,
+    pub cron_store: Option<Arc<Mutex<CronStore>>>,
+    /// The iMessage handle of the user sending the message (for scheduling).
+    pub sender_handle: String,
 }
 
 /// Return the list of built-in tool definitions for the Claude API.
@@ -173,6 +180,76 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["query"]
             }),
         },
+        ToolDefinition {
+            name: "web_search".to_string(),
+            description: "인터넷에서 정보를 검색한다. 최신 뉴스, 사실 확인, 모르는 주제 조사 등에 사용.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "검색 쿼리"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "최대 결과 수 (기본 5, 최대 10)",
+                        "default": 5
+                    }
+                },
+                "required": ["query"]
+            }),
+        },
+        ToolDefinition {
+            name: "schedule_reminder".to_string(),
+            description: "리마인더나 반복 작업을 예약한다. 특정 시간에 알림을 보내거나 정기적으로 알림을 반복할 때 사용.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "리마인더 내용"
+                    },
+                    "cron_expr": {
+                        "type": "string",
+                        "description": "5자리 cron 표현식 (분 시 일 월 요일). 예: '0 9 * * *'은 매일 9시"
+                    },
+                    "datetime": {
+                        "type": "string",
+                        "description": "일회성 알림 시간 (ISO 8601). 예: '2026-05-01T09:00:00' 또는 '2026-05-01 09:00'"
+                    },
+                    "repeat": {
+                        "type": "boolean",
+                        "description": "반복 여부 (cron_expr 사용 시 기본 true, datetime 사용 시 기본 false)"
+                    }
+                },
+                "required": ["message"]
+            }),
+        },
+        ToolDefinition {
+            name: "list_reminders".to_string(),
+            description: "현재 예약된 리마인더 목록을 보여준다.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDefinition {
+            name: "cancel_reminder".to_string(),
+            description: "예약된 리마인더를 취소한다. ID 또는 내용의 일부로 검색해서 삭제.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "삭제할 리마인더 ID"
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "리마인더 내용 검색어 (일부만 일치해도 삭제)"
+                    }
+                }
+            }),
+        },
     ]
 }
 
@@ -193,6 +270,10 @@ pub async fn execute_builtin(
         "write_file" => exec_write_file(input),
         "claude_code" => exec_claude_code(input, ctx).await,
         "twitter_search" => exec_twitter_search(input, ctx).await,
+        "web_search" => exec_web_search(input, ctx).await,
+        "schedule_reminder" => exec_schedule_reminder(input, ctx).await,
+        "list_reminders" => exec_list_reminders(ctx).await,
+        "cancel_reminder" => exec_cancel_reminder(input, ctx).await,
         _ => Err(format!("unknown tool: {name}")),
     }
 }
@@ -561,6 +642,276 @@ async fn exec_twitter_search(
     Ok(truncate_output(&result, MAX_OUTPUT_BYTES))
 }
 
+// ── Web search ──────────────────────────────────────────────────────────
+
+/// Load a secret from a source string (env:VAR or file:PATH).
+fn load_key_from_source(source: &str) -> Result<String, String> {
+    if let Some(var_name) = source.strip_prefix("env:") {
+        return std::env::var(var_name)
+            .map(|k| k.trim().to_string())
+            .map_err(|_| format!("환경변수 '{var_name}'이 설정되지 않았습니다"));
+    }
+    if let Some(file_path) = source.strip_prefix("file:") {
+        let expanded = sam_core::expand_tilde(file_path);
+        return std::fs::read_to_string(&expanded)
+            .map(|k| k.trim().to_string())
+            .map_err(|e| format!("파일 읽기 실패 '{expanded}': {e}"));
+    }
+    Err("소스 형식이 올바르지 않습니다 (env: 또는 file: 접두사 필요)".to_string())
+}
+
+async fn exec_web_search(
+    input: &serde_json::Value,
+    ctx: &ToolContext<'_>,
+) -> Result<String, String> {
+    if !ctx.config.web_search.enabled {
+        return Err("웹 검색이 비활성화되어 있어. config.toml에서 [web_search] enabled = true로 설정해줘.".to_string());
+    }
+
+    let query = input["query"].as_str().ok_or("missing 'query' parameter")?;
+    let max_results = input["max_results"].as_u64().unwrap_or(5).min(10);
+
+    info!(query = query, max_results = max_results, provider = %ctx.config.web_search.provider, "web_search");
+
+    match ctx.config.web_search.provider.as_str() {
+        "brave" => exec_web_search_brave(query, max_results, ctx).await,
+        _ => exec_web_search_xai(query, max_results, ctx).await,
+    }
+}
+
+/// xAI Live Search — uses Grok's /v1/chat/completions with search tool.
+async fn exec_web_search_xai(
+    query: &str,
+    max_results: u64,
+    ctx: &ToolContext<'_>,
+) -> Result<String, String> {
+    // Resolve API key: use web_search.api_key_source if set, else fall back to llm.api_key_source.
+    let api_key = if let Some(source) = &ctx.config.web_search.api_key_source {
+        load_key_from_source(source)?
+    } else if let Some(source) = &ctx.config.llm.api_key_source {
+        load_key_from_source(source)?
+    } else {
+        return Err("xAI API 키가 설정되지 않았어.".to_string());
+    };
+
+    let base_url = &ctx.config.llm.base_url;
+
+    let body = json!({
+        "model": "grok-3-mini",
+        "messages": [
+            {
+                "role": "system",
+                "content": format!(
+                    "You are a search assistant. Search the web for the query and return the top {} results. \
+                     For each result, provide: title, URL, and a brief description. \
+                     Format as a numbered list. Be concise. Respond in Korean if the query is in Korean.",
+                    max_results
+                )
+            },
+            {
+                "role": "user",
+                "content": query
+            }
+        ],
+        "search_parameters": {
+            "mode": "auto",
+            "return_citations": true,
+            "max_search_results": max_results
+        },
+        "temperature": 0.0,
+        "max_tokens": 2048
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base_url}/v1/chat/completions"))
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("xAI 검색 요청 실패: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("xAI API 에러 HTTP {status}: {err_body}"));
+    }
+
+    let resp_body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("응답 파싱 실패: {e}"))?;
+
+    // Extract the assistant's response text.
+    let text = resp_body["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("검색 결과를 가져오지 못했습니다.");
+
+    // Also extract citations if available.
+    let mut result = text.to_string();
+    if let Some(citations) = resp_body["citations"].as_array() {
+        if !citations.is_empty() {
+            result.push_str("\n\n출처:\n");
+            for (i, c) in citations.iter().enumerate() {
+                if let Some(url) = c.as_str() {
+                    result.push_str(&format!("[{}] {}\n", i + 1, url));
+                }
+            }
+        }
+    }
+
+    Ok(truncate_output(&result, MAX_OUTPUT_BYTES))
+}
+
+/// Brave Search API fallback.
+async fn exec_web_search_brave(
+    query: &str,
+    max_results: u64,
+    ctx: &ToolContext<'_>,
+) -> Result<String, String> {
+    let api_key = ctx.config.web_search.api_key_source
+        .as_deref()
+        .ok_or("Brave Search API 키가 설정되지 않았어.")?;
+    let api_key = load_key_from_source(api_key)?;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://api.search.brave.com/res/v1/web/search")
+        .header("X-Subscription-Token", &api_key)
+        .header("Accept", "application/json")
+        .query(&[
+            ("q", query),
+            ("count", &max_results.to_string()),
+            ("search_lang", "ko"),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("검색 요청 실패: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Brave Search API 에러 HTTP {status}: {body}"));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("응답 파싱 실패: {e}"))?;
+
+    let results = body["web"]["results"]
+        .as_array()
+        .ok_or("검색 결과가 없습니다.")?;
+
+    if results.is_empty() {
+        return Ok("검색 결과가 없습니다.".to_string());
+    }
+
+    let mut output = format!("'{query}' 검색 결과 ({}건):\n\n", results.len());
+    for (i, r) in results.iter().enumerate() {
+        let title = r["title"].as_str().unwrap_or("");
+        let url = r["url"].as_str().unwrap_or("");
+        let desc = r["description"].as_str().unwrap_or("");
+        output.push_str(&format!("{}. {}\n   {}\n   {}\n\n", i + 1, title, url, desc));
+    }
+
+    Ok(truncate_output(&output, MAX_OUTPUT_BYTES))
+}
+
+// ── Cron/Reminder tools ──────────────────────────────────────────────────
+
+async fn exec_schedule_reminder(
+    input: &serde_json::Value,
+    ctx: &ToolContext<'_>,
+) -> Result<String, String> {
+    let store_arc = ctx.cron_store.as_ref().ok_or("cron system unavailable")?;
+    let message = input["message"].as_str().ok_or("missing 'message' parameter")?;
+
+    let schedule = if let Some(cron_expr) = input["cron_expr"].as_str() {
+        CronSchedule::Cron { expr: cron_expr.to_string() }
+    } else if let Some(datetime) = input["datetime"].as_str() {
+        let unix = parse_datetime_to_unix(datetime)
+            .ok_or(format!("날짜 형식을 인식할 수 없어: '{datetime}'. 'YYYY-MM-DD HH:MM' 형식으로 입력해줘."))?;
+        CronSchedule::Once { at_unix: unix }
+    } else {
+        return Err("'cron_expr' 또는 'datetime' 중 하나는 필수야.".to_string());
+    };
+
+    let repeat = input["repeat"].as_bool().unwrap_or(matches!(&schedule, CronSchedule::Cron { .. }));
+    let job = new_job(&ctx.sender_handle, message, schedule.clone(), repeat);
+
+    let mut store = store_arc.lock().await;
+    let id = store.add(job);
+
+    let schedule_desc = match &schedule {
+        CronSchedule::Cron { expr } => format!("반복: {expr}"),
+        CronSchedule::Once { at_unix } => {
+            let dt = chrono::Local.timestamp_opt(*at_unix, 0)
+                .single()
+                .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| at_unix.to_string());
+            format!("일회: {dt}")
+        }
+    };
+
+    info!(id = %id, message = message, "reminder scheduled");
+    Ok(format!("리마인더 예약 완료!\n내용: {message}\n스케줄: {schedule_desc}\nID: {id}"))
+}
+
+async fn exec_list_reminders(ctx: &ToolContext<'_>) -> Result<String, String> {
+    let store_arc = ctx.cron_store.as_ref().ok_or("cron system unavailable")?;
+    let store = store_arc.lock().await;
+    let jobs = store.list();
+
+    if jobs.is_empty() {
+        return Ok("예약된 리마인더가 없어.".to_string());
+    }
+
+    let mut result = format!("예약된 리마인더 {}건:\n\n", jobs.len());
+    for job in jobs {
+        let schedule_desc = match &job.schedule {
+            CronSchedule::Cron { expr } => format!("🔁 {expr}"),
+            CronSchedule::Once { at_unix } => {
+                let dt = chrono::Local.timestamp_opt(*at_unix, 0)
+                    .single()
+                    .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| at_unix.to_string());
+                format!("📅 {dt}")
+            }
+        };
+        result.push_str(&format!("• {} — {}\n  ID: {}\n", job.message, schedule_desc, job.id));
+    }
+
+    Ok(result)
+}
+
+async fn exec_cancel_reminder(
+    input: &serde_json::Value,
+    ctx: &ToolContext<'_>,
+) -> Result<String, String> {
+    let store_arc = ctx.cron_store.as_ref().ok_or("cron system unavailable")?;
+    let mut store = store_arc.lock().await;
+
+    if let Some(id) = input["id"].as_str() {
+        if store.remove(id) {
+            return Ok(format!("리마인더 삭제 완료 (ID: {id})"));
+        } else {
+            return Err(format!("ID '{id}'에 해당하는 리마인더를 찾지 못했어."));
+        }
+    }
+
+    if let Some(query) = input["query"].as_str() {
+        if let Some(job) = store.remove_by_message(query) {
+            return Ok(format!("리마인더 삭제 완료: '{}'", job.message));
+        } else {
+            return Err(format!("'{query}'에 해당하는 리마인더를 찾지 못했어."));
+        }
+    }
+
+    Err("'id' 또는 'query' 중 하나를 지정해줘.".to_string())
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 fn truncate_output(s: &str, max_bytes: usize) -> String {
@@ -583,7 +934,7 @@ mod tests {
     #[test]
     fn builtin_definitions_are_valid() {
         let defs = builtin_tool_definitions();
-        assert_eq!(defs.len(), 8);
+        assert_eq!(defs.len(), 12);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"memory_recall"));
         assert!(names.contains(&"run_command"));
@@ -605,7 +956,7 @@ mod tests {
     fn unknown_tool_is_rejected() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let config = SamConfig::default();
-        let mut ctx = ToolContext { memory: None, config: &config };
+        let mut ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new() };
         let input = json!({});
         let result = rt.block_on(execute_builtin("nonexistent", &input, &mut ctx));
         assert!(result.is_err());
@@ -614,7 +965,7 @@ mod tests {
     #[test]
     fn memory_recall_without_adapter_returns_error() {
         let config = SamConfig::default();
-        let mut ctx = ToolContext { memory: None, config: &config };
+        let mut ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new() };
         let input = json!({"query": "test"});
         let result = exec_memory_recall(&input, &mut ctx);
         assert!(result.is_err());
@@ -624,7 +975,7 @@ mod tests {
     #[test]
     fn memory_store_without_adapter_returns_error() {
         let config = SamConfig::default();
-        let mut ctx = ToolContext { memory: None, config: &config };
+        let mut ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new() };
         let input = json!({"text": "remember this"});
         let result = exec_memory_store(&input, &mut ctx);
         assert!(result.is_err());
@@ -667,7 +1018,7 @@ mod tests {
     fn run_command_works() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let config = SamConfig::default();
-        let ctx = ToolContext { memory: None, config: &config };
+        let ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new() };
         let input = json!({"command": "echo hello", "working_dir": "/tmp"});
         let result = rt.block_on(exec_run_command(&input, &ctx));
         assert!(result.is_ok());
@@ -679,7 +1030,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut config = SamConfig::default();
         config.safety.destructive_patterns = vec!["rm -rf".to_string()];
-        let ctx = ToolContext { memory: None, config: &config };
+        let ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new() };
         let input = json!({"command": "rm -rf /"});
         let result = rt.block_on(exec_run_command(&input, &ctx));
         assert!(result.is_err());

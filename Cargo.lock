@@ -1711,12 +1711,14 @@ dependencies = [
 name = "sam-core"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "dirs",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "toml",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -117,6 +117,7 @@ pub async fn run() -> i32 {
                 input,
                 memory.as_mut(),
                 &config,
+                None,
             )
             .await
         {

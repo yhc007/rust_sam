@@ -148,6 +148,7 @@ async fn chat_handler(
             &req.message,
             memory.as_mut(),
             config,
+            None,
         )
         .await
     {

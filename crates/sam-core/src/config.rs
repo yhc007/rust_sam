@@ -29,6 +29,8 @@ pub struct SamConfig {
     #[serde(default)]
     pub twitter: TwitterConfig,
     #[serde(default)]
+    pub web_search: WebSearchConfig,
+    #[serde(default)]
     pub safety: SafetyConfig,
 }
 
@@ -105,6 +107,10 @@ pub struct LlmConfig {
     pub temperature: f32,
     #[serde(default = "LlmConfig::default_history")]
     pub max_history: usize,
+    /// Seconds before sending "..." ack message while waiting for LLM.
+    /// 0 = disabled.
+    #[serde(default = "LlmConfig::default_ack_delay")]
+    pub ack_delay_secs: u64,
 }
 
 impl LlmConfig {
@@ -117,6 +123,7 @@ impl LlmConfig {
     fn default_retries() -> u32 { 3 }
     fn default_temperature() -> f32 { 0.7 }
     fn default_history() -> usize { 20 }
+    fn default_ack_delay() -> u64 { 5 }
 }
 
 impl Default for LlmConfig {
@@ -132,6 +139,7 @@ impl Default for LlmConfig {
             max_retries: Self::default_retries(),
             temperature: Self::default_temperature(),
             max_history: Self::default_history(),
+            ack_delay_secs: Self::default_ack_delay(),
         }
     }
 }
@@ -279,6 +287,36 @@ impl Default for TwitterConfig {
         Self {
             enabled: false,
             bearer_token_source: Self::default_bearer_source(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSearchConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// "xai" (uses xAI/Grok live search) or "brave" (Brave Search API).
+    #[serde(default = "WebSearchConfig::default_provider")]
+    pub provider: String,
+    /// API key source. For xai, reuses [llm].api_key_source by default.
+    #[serde(default)]
+    pub api_key_source: Option<String>,
+    #[serde(default = "WebSearchConfig::default_max_results")]
+    pub max_results: u32,
+}
+
+impl WebSearchConfig {
+    fn default_provider() -> String { "xai".to_string() }
+    fn default_max_results() -> u32 { 5 }
+}
+
+impl Default for WebSearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: Self::default_provider(),
+            api_key_source: None,
+            max_results: Self::default_max_results(),
         }
     }
 }

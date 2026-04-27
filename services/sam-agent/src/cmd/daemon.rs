@@ -2,8 +2,9 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -11,7 +12,7 @@ use sam_claude::{
     load_api_key, load_system_prompt, ConversationSession, LlmBackend, OpenAiCompatibleClient,
     SamClaudeClient, TokenBudget, XaiClient,
 };
-use sam_core::{config_path, load_config};
+use sam_core::{config_path, load_config, CronStore, DeliveryQueue};
 use sam_memory_adapter::MemoryAdapter;
 use sam_imessage::outbound::run_sender;
 use sam_imessage::poller::run_poller;
@@ -83,6 +84,13 @@ pub async fn run() -> i32 {
         }
     };
 
+    // Cron store (reminders & scheduled jobs).
+    let cron_store = Arc::new(Mutex::new(CronStore::load()));
+    info!(jobs = cron_store.lock().await.list().len(), "CronStore loaded");
+
+    // Delivery queue (persist outbound messages across restarts).
+    let delivery_queue = Arc::new(Mutex::new(DeliveryQueue::load()));
+
     info!(provider = %config.llm.provider, model = %config.llm.model, "Sam daemon started");
 
     let cancel = CancellationToken::new();
@@ -90,6 +98,22 @@ pub async fn run() -> i32 {
     // Channels.
     let (inbound_tx, mut inbound_rx) = mpsc::channel::<IncomingMessage>(64);
     let (outbound_tx, outbound_rx) = mpsc::channel::<OutgoingMessage>(64);
+
+    // Flush any pending messages from previous run.
+    {
+        let mut dq = delivery_queue.lock().await;
+        let pending = dq.drain_pending();
+        if !pending.is_empty() {
+            info!(count = pending.len(), "flushing pending delivery queue");
+            for msg in pending {
+                let out = OutgoingMessage {
+                    handle: msg.handle,
+                    body: msg.body,
+                };
+                let _ = outbound_tx.send(out).await;
+            }
+        }
+    }
 
     // Poller task.
     let poller_cancel = cancel.clone();
@@ -109,11 +133,41 @@ pub async fn run() -> i32 {
         }
     });
 
+    // Cron runner task — checks for due jobs every 60 seconds.
+    let cron_cancel = cancel.clone();
+    let cron_outbound_tx = outbound_tx.clone();
+    let cron_store_runner = Arc::clone(&cron_store);
+    let cron_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            tokio::select! {
+                _ = cron_cancel.cancelled() => break,
+                _ = interval.tick() => {
+                    let now = chrono::Utc::now().timestamp();
+                    let mut store = cron_store_runner.lock().await;
+                    let due: Vec<_> = store.due_jobs(now).into_iter().cloned().collect();
+                    for job in &due {
+                        let msg = OutgoingMessage {
+                            handle: job.handle.clone(),
+                            body: format!("⏰ {}", job.message),
+                        };
+                        info!(job_id = %job.id, message = %job.message, "cron job fired");
+                        let _ = cron_outbound_tx.send(msg).await;
+                        store.mark_fired(&job.id, now);
+                    }
+                    // Remove one-shot jobs that have fired.
+                    store.cleanup_fired();
+                }
+            }
+        }
+    });
+
     // Claude router task — runs on the main spawn so it can own mutable
     // sessions and budget without Arc<Mutex>.
     let router_cancel = cancel.clone();
     let router_client = Arc::clone(&client);
     let router_config = config.clone();
+    let router_dq = Arc::clone(&delivery_queue);
     let router_handle = tokio::spawn(async move {
         let mut sessions: HashMap<String, ConversationSession> = HashMap::new();
         // Dedup map: tracks texts we sent + when, so we can skip echo copies.
@@ -194,12 +248,29 @@ pub async fn run() -> i32 {
                         });
                         let session = sessions.get_mut(&m.sender).unwrap();
 
+                        // Spawn ack timer — sends "..." if reply takes too long.
+                        let ack_delay = router_config.llm.ack_delay_secs;
+                        let ack_task = if ack_delay > 0 {
+                            let ack_tx = outbound_tx.clone();
+                            let ack_handle = m.sender.clone();
+                            Some(tokio::spawn(async move {
+                                tokio::time::sleep(Duration::from_secs(ack_delay)).await;
+                                let _ = ack_tx.send(OutgoingMessage {
+                                    handle: ack_handle,
+                                    body: "...".to_string(),
+                                }).await;
+                            }))
+                        } else {
+                            None
+                        };
+
                         let reply = match session.reply(
                             router_client.as_ref(),
                             &mut budget,
                             &m.text,
                             memory.as_mut(),
                             &router_config,
+                            Some(Arc::clone(&cron_store)),
                         ).await {
                             Ok(text) => {
                                 consecutive_errors.remove(&m.sender);
@@ -216,13 +287,15 @@ pub async fn run() -> i32 {
                                     "LLM error: {e}"
                                 );
                                 if *count >= MAX_CONSECUTIVE_ERRORS {
-                                    // Don't send error message to avoid echo loop.
-                                    // Session will be reset on next incoming message.
+                                    if let Some(t) = ack_task { t.abort(); }
                                     continue;
                                 }
                                 format!("⚠️ 오류가 발생했어: {e}")
                             }
                         };
+
+                        // Cancel ack if reply arrived before timeout.
+                        if let Some(t) = ack_task { t.abort(); }
 
                         info!(
                             sender = %m.sender,
@@ -241,6 +314,11 @@ pub async fn run() -> i32 {
                         // Evict expired entries to prevent unbounded growth.
                         sent_texts.retain(|_, ts| ts.elapsed().as_secs() < SENT_TEXT_TTL_SECS);
                         for part in parts {
+                            // Enqueue to delivery queue (persists to disk).
+                            let queue_id = {
+                                let mut dq = router_dq.lock().await;
+                                dq.enqueue(&m.sender, &part)
+                            };
                             let out = OutgoingMessage {
                                 handle: m.sender.clone(),
                                 body: part,
@@ -248,6 +326,9 @@ pub async fn run() -> i32 {
                             if outbound_tx.send(out).await.is_err() {
                                 return;
                             }
+                            // Ack after successful channel send.
+                            let mut dq = router_dq.lock().await;
+                            dq.ack(&queue_id);
                         }
                         // Record when we last sent a reply to this handle.
                         last_reply_time.insert(m.sender.clone(), std::time::Instant::now());
@@ -268,7 +349,7 @@ pub async fn run() -> i32 {
     info!("Sam shutting down");
     cancel.cancel();
 
-    let _ = tokio::join!(poller_handle, sender_handle, router_handle);
+    let _ = tokio::join!(poller_handle, sender_handle, router_handle, cron_handle);
     info!("Sam daemon stopped");
     0
 }

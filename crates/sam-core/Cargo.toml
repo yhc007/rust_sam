@@ -13,3 +13,5 @@ toml.workspace = true
 thiserror.workspace = true
 dirs.workspace = true
 tracing.workspace = true
+chrono.workspace = true
+uuid.workspace = true
