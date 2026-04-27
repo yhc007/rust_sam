@@ -46,6 +46,36 @@ pub struct ToolContext<'a> {
     pub skill_store: Option<Arc<Mutex<SkillStore>>>,
 }
 
+/// Names of core tools that smaller models (grok-3-mini, etc.) should always see.
+/// Other tools are still executable but not sent in the API request.
+pub const CORE_TOOL_NAMES: &[&str] = &[
+    "memory_recall",
+    "memory_store",
+    "current_time",
+    "run_command",
+    "read_file",
+    "write_file",
+    "web_search",
+    "schedule_reminder",
+    "list_reminders",
+    "cancel_reminder",
+    "claude_code",
+    "notion_create_page",
+    "handoff_to_agent",
+];
+
+/// Maximum number of tool definitions to send to the API.
+/// Models like grok-3-mini struggle with >15 tools.
+pub const MAX_API_TOOLS: usize = 20;
+
+/// Return only the core tool definitions (for smaller models).
+pub fn core_tool_definitions() -> Vec<ToolDefinition> {
+    builtin_tool_definitions()
+        .into_iter()
+        .filter(|t| CORE_TOOL_NAMES.contains(&t.name.as_str()))
+        .collect()
+}
+
 /// Return the list of built-in tool definitions for the Claude API.
 pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
     vec![

@@ -13,7 +13,7 @@ use sam_memory_adapter::MemoryAdapter;
 use crate::budget::TokenBudget;
 use crate::llm_client::LlmClient;
 use crate::mcp::McpClient;
-use crate::tools::{builtin_tool_definitions, execute_builtin, ToolContext, MAX_TOOL_ROUNDS};
+use crate::tools::{builtin_tool_definitions, execute_builtin, ToolContext, MAX_TOOL_ROUNDS, MAX_API_TOOLS};
 use crate::types::*;
 
 /// Default maximum characters for the rolling context summary.
@@ -216,7 +216,31 @@ impl ConversationSession {
         // Build effective system prompt (base + context summary).
         let effective_system = self.effective_system_prompt();
 
-        let tools_slice = &self.tools;
+        // Limit tools sent to the API to avoid overwhelming smaller models.
+        // All tools remain executable — only the API request is trimmed.
+        let api_tools: Vec<ToolDefinition> = if self.tools.len() > MAX_API_TOOLS {
+            // Prioritize core tools, then fill with custom skills up to limit.
+            let core_names: std::collections::HashSet<&str> =
+                crate::tools::CORE_TOOL_NAMES.iter().copied().collect();
+            let mut selected: Vec<ToolDefinition> = self
+                .tools
+                .iter()
+                .filter(|t| core_names.contains(t.name.as_str()))
+                .cloned()
+                .collect();
+            for t in &self.tools {
+                if selected.len() >= MAX_API_TOOLS {
+                    break;
+                }
+                if !core_names.contains(t.name.as_str()) {
+                    selected.push(t.clone());
+                }
+            }
+            selected
+        } else {
+            self.tools.clone()
+        };
+        let tools_slice = &api_tools;
         let mut total_input = 0u32;
         let mut total_output = 0u32;
 
