@@ -133,7 +133,7 @@ impl ChatDbReader {
     /// Returns attachments with supported image or audio MIME types.
     /// The `filename` column uses `~` prefix which is expanded to the home dir.
     fn fetch_attachments(&self, message_rowid: i64) -> Vec<Attachment> {
-        let sql = "SELECT a.filename, a.mime_type, a.transfer_name \
+        let sql = "SELECT a.filename, a.mime_type, a.transfer_name, a.uti \
                    FROM attachment a \
                    JOIN message_attachment_join maj ON a.ROWID = maj.attachment_id \
                    WHERE maj.message_id = ?1";
@@ -150,7 +150,8 @@ impl ChatDbReader {
             let filename: Option<String> = row.get(0)?;
             let mime_type: Option<String> = row.get(1)?;
             let transfer_name: Option<String> = row.get(2)?;
-            Ok((filename, mime_type, transfer_name))
+            let uti: Option<String> = row.get(3)?;
+            Ok((filename, mime_type, transfer_name, uti))
         }) {
             Ok(r) => r,
             Err(e) => {
@@ -162,7 +163,12 @@ impl ChatDbReader {
         let mut attachments = Vec::new();
         for row in rows {
             match row {
-                Ok((Some(filename), Some(mime_type), transfer_name)) => {
+                Ok((Some(filename), mime_type_opt, transfer_name, uti)) => {
+                    // Resolve MIME type: use mime_type if present, else infer from UTI.
+                    let mime_type = mime_type_opt
+                        .or_else(|| uti.as_deref().and_then(mime_from_uti))
+                        .unwrap_or_default();
+
                     // Only include supported image and audio types.
                     if !IMAGE_MIME_TYPES.contains(&mime_type.as_str())
                         && !AUDIO_MIME_TYPES.contains(&mime_type.as_str())
@@ -176,12 +182,15 @@ impl ChatDbReader {
                         filename: transfer_name.unwrap_or_else(|| filename.clone()),
                     });
                 }
-                Ok(_) => {} // skip rows with NULL filename or mime_type
+                Ok(_) => {} // skip rows with NULL filename
                 Err(e) => warn!(message_rowid, "skipping malformed attachment row: {e}"),
             }
         }
         attachments
     }
+
+
+
 
     /// Count messages from any of the given handles within the last
     /// `minutes` minutes. Returns `0` if no handles are provided.
@@ -219,6 +228,26 @@ impl ChatDbReader {
         }
         let count: i64 = stmt.query_row(rusqlite::params_from_iter(params.iter()), |row| row.get(0))?;
         Ok(count.max(0) as usize)
+    }
+}
+
+/// Map Apple UTI strings to MIME types.
+/// iMessage sometimes stores UTI instead of mime_type (e.g. audio messages).
+fn mime_from_uti(uti: &str) -> Option<String> {
+    match uti {
+        "com.apple.coreaudio-format" => Some("audio/x-caf".to_string()),
+        "public.mp3" | "public.mpeg-4-audio" => Some("audio/mpeg".to_string()),
+        "com.apple.m4a-audio" => Some("audio/x-m4a".to_string()),
+        "public.aac-audio" => Some("audio/aac".to_string()),
+        "com.microsoft.waveform-audio" => Some("audio/wav".to_string()),
+        "org.xiph.ogg-audio" | "org.xiph.flac" => Some("audio/ogg".to_string()),
+        "public.amr-audio" => Some("audio/amr".to_string()),
+        "public.jpeg" => Some("image/jpeg".to_string()),
+        "public.png" => Some("image/png".to_string()),
+        "public.heic" | "public.heif" => Some("image/heic".to_string()),
+        "com.compuserve.gif" => Some("image/gif".to_string()),
+        "public.webp" => Some("image/webp".to_string()),
+        _ => None,
     }
 }
 
