@@ -16,6 +16,28 @@ use crate::mcp::McpClient;
 use crate::tools::{builtin_tool_definitions, execute_builtin, ToolContext, MAX_TOOL_ROUNDS};
 use crate::types::*;
 
+/// Default maximum characters for the rolling context summary.
+const DEFAULT_MAX_SUMMARY_CHARS: usize = 1200;
+
+/// Default max history tokens before compaction kicks in.
+const DEFAULT_MAX_HISTORY_TOKENS: usize = 16_000;
+
+/// Truncate a string at a word boundary, appending "..." if truncated.
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let chars: Vec<char> = s.chars().take(max).collect();
+    let mut end = chars.len();
+    while end > 0 && !chars[end - 1].is_whitespace() {
+        end -= 1;
+    }
+    if end == 0 {
+        end = max;
+    }
+    format!("{}...", chars[..end].iter().collect::<String>().trim_end())
+}
+
 /// A single conversation session identified by an iMessage handle.
 pub struct ConversationSession {
     /// iMessage handle or identifier for this session.
@@ -34,6 +56,10 @@ pub struct ConversationSession {
     /// Handoff context from a previous agent — injected into system prompt
     /// so the receiving agent has full context of the prior conversation.
     handoff_context: Option<String>,
+    /// Max estimated tokens for history before token-based trim.
+    max_context_tokens: usize,
+    /// Max chars for the rolling context summary.
+    max_summary_chars: usize,
 }
 
 /// Serializable snapshot of session state for persistence.
@@ -54,6 +80,8 @@ impl ConversationSession {
             tools: builtin_tool_definitions(),
             context_summary: None,
             handoff_context: None,
+            max_context_tokens: DEFAULT_MAX_HISTORY_TOKENS,
+            max_summary_chars: DEFAULT_MAX_SUMMARY_CHARS,
         }
     }
 
@@ -77,6 +105,8 @@ impl ConversationSession {
             tools,
             context_summary: None,
             handoff_context: None,
+            max_context_tokens: DEFAULT_MAX_HISTORY_TOKENS,
+            max_summary_chars: DEFAULT_MAX_SUMMARY_CHARS,
         }
     }
 
@@ -97,6 +127,8 @@ impl ConversationSession {
                             tools: builtin_tool_definitions(),
                             context_summary: snap.context_summary,
                             handoff_context: None,
+                            max_context_tokens: DEFAULT_MAX_HISTORY_TOKENS,
+                            max_summary_chars: DEFAULT_MAX_SUMMARY_CHARS,
                         };
                     }
                     Err(e) => {
@@ -420,67 +452,199 @@ impl ConversationSession {
     }
 
     /// Summarize dropped messages into the rolling context_summary.
+    ///
+    /// Uses structured summarization that preserves:
+    /// - Key facts and decisions
+    /// - Tool actions and their outcomes
+    /// - User preferences expressed during conversation
+    /// - Ongoing tasks or pending items
     async fn compact(&mut self, client: &dyn LlmClient, dropped: &[ChatMessage]) {
-        // Format dropped messages as text.
-        let mut text = String::new();
-        for msg in dropped {
-            let role = &msg.role;
-            let content = match &msg.content {
-                MessageContent::Text(s) => s.clone(),
-                MessageContent::Blocks(blocks) => {
-                    blocks.iter().filter_map(|b| match b {
-                        ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    }).collect::<Vec<_>>().join(" ")
-                }
-            };
-            if !content.is_empty() {
-                text.push_str(&format!("[{role}] {content}\n"));
-            }
-        }
-
+        let text = Self::format_messages_for_summary(dropped);
         if text.is_empty() {
             return;
         }
 
-        // Build summarization request (no tools, short).
-        let summarize_prompt = "다음 대화를 3-5문장으로 요약해. 핵심 사실, 결정사항, 맥락만 간결하게. 요약만 출력하고 다른 말은 하지 마.";
-        let messages = vec![
-            ChatMessage::text("user", &format!("{summarize_prompt}\n\n---\n{text}")),
-        ];
+        // If existing summary is already large, do a two-phase compaction:
+        // first re-summarize the old summary + new dropped into a fresh one.
+        let needs_recompact = self
+            .context_summary
+            .as_ref()
+            .is_some_and(|s| s.chars().count() > 600);
 
-        match client.chat(
-            "You are a concise summarizer. Output only the summary.",
-            &messages,
-            None,
-        ).await {
+        let summarize_prompt = if needs_recompact {
+            // Re-summarize everything into a structured format.
+            format!(
+                concat!(
+                    "기존 대화 요약과 새로운 대화 내역이 있다. ",
+                    "전체를 하나의 구조화된 요약으로 통합해줘.\n\n",
+                    "반드시 다음 형식으로 출력:\n",
+                    "## 핵심 사실\n- (중요한 사실/결정 bullet points)\n\n",
+                    "## 도구 사용 이력\n- (어떤 도구로 무엇을 했는지)\n\n",
+                    "## 진행 중인 작업\n- (아직 완료되지 않은 것)\n\n",
+                    "## 사용자 선호\n- (대화 중 드러난 선호/제약)\n\n",
+                    "각 섹션은 해당 내용이 있을 때만 포함. 최대 10줄.\n\n",
+                    "---\n[기존 요약]\n{}\n\n[새 대화]\n{}"
+                ),
+                self.context_summary.as_deref().unwrap_or(""),
+                text
+            )
+        } else {
+            format!(
+                concat!(
+                    "다음 대화를 구조화된 요약으로 만들어줘.\n\n",
+                    "반드시 다음 형식으로 출력:\n",
+                    "## 핵심 사실\n- (중요한 사실/결정 bullet points)\n\n",
+                    "## 도구 사용 이력\n- (어떤 도구로 무엇을 했는지, 없으면 생략)\n\n",
+                    "## 진행 중인 작업\n- (아직 완료되지 않은 것, 없으면 생략)\n\n",
+                    "## 사용자 선호\n- (대화 중 드러난 선호/제약, 없으면 생략)\n\n",
+                    "각 섹션은 해당 내용이 있을 때만 포함. 최대 8줄. 요약만 출력.\n\n---\n{}"
+                ),
+                text
+            )
+        };
+
+        let messages = vec![ChatMessage::text("user", &summarize_prompt)];
+
+        match client
+            .chat(
+                "You are a structured conversation summarizer. Output only the structured summary in the requested format.",
+                &messages,
+                None,
+            )
+            .await
+        {
             Ok(resp) => {
                 let new_summary = resp.text.trim().to_string();
                 if !new_summary.is_empty() {
-                    // Merge with existing summary (keep last 500 chars of old + new).
-                    self.context_summary = Some(match &self.context_summary {
-                        Some(existing) => {
-                            let combined = format!("{existing}\n{new_summary}");
-                            // Cap at ~800 chars to avoid bloating the system prompt.
-                            if combined.chars().count() > 800 {
-                                combined.chars().skip(combined.chars().count() - 800).collect()
-                            } else {
-                                combined
+                    if needs_recompact {
+                        // Full re-summarization: replace entirely.
+                        self.context_summary = Some(Self::cap_summary(&new_summary, self.max_summary_chars));
+                    } else {
+                        // Append mode: merge with existing.
+                        self.context_summary = Some(match &self.context_summary {
+                            Some(existing) => {
+                                let combined = format!("{existing}\n\n{new_summary}");
+                                Self::cap_summary(&combined, self.max_summary_chars)
                             }
-                        }
-                        None => new_summary,
-                    });
-                    info!(handle = %self.handle, "context compaction done");
+                            None => new_summary,
+                        });
+                    }
+                    info!(
+                        handle = %self.handle,
+                        summary_len = self.context_summary.as_ref().map(|s| s.len()).unwrap_or(0),
+                        recompacted = needs_recompact,
+                        "context compaction done"
+                    );
                 }
             }
             Err(e) => {
-                warn!(error = %e, "context compaction failed, continuing without summary");
+                warn!(error = %e, "context compaction failed, using extractive fallback");
+                // Extractive fallback: keep key sentences from dropped messages.
+                let fallback = Self::extractive_fallback(dropped);
+                if !fallback.is_empty() {
+                    self.context_summary = Some(match &self.context_summary {
+                        Some(existing) => {
+                            Self::cap_summary(&format!("{existing}\n{fallback}"), self.max_summary_chars)
+                        }
+                        None => fallback,
+                    });
+                }
             }
         }
     }
 
+    /// Format messages for summarization, including tool use context.
+    fn format_messages_for_summary(messages: &[ChatMessage]) -> String {
+        let mut text = String::new();
+        for msg in messages {
+            let role = &msg.role;
+            match &msg.content {
+                MessageContent::Text(s) => {
+                    if !s.is_empty() {
+                        text.push_str(&format!("[{role}] {s}\n"));
+                    }
+                }
+                MessageContent::Blocks(blocks) => {
+                    for block in blocks {
+                        match block {
+                            ContentBlock::Text { text: t } => {
+                                if !t.is_empty() {
+                                    text.push_str(&format!("[{role}] {t}\n"));
+                                }
+                            }
+                            ContentBlock::ToolUse { name, input, .. } => {
+                                // Include tool calls with abbreviated input.
+                                let input_str = input.to_string();
+                                let abbreviated = if input_str.len() > 100 {
+                                    format!("{}...", &input_str[..100])
+                                } else {
+                                    input_str
+                                };
+                                text.push_str(&format!("[tool:{name}] {abbreviated}\n"));
+                            }
+                            ContentBlock::ToolResult {
+                                content, is_error, ..
+                            } => {
+                                let prefix = if *is_error { "error" } else { "result" };
+                                let abbreviated = if content.len() > 150 {
+                                    format!("{}...", &content[..150])
+                                } else {
+                                    content.clone()
+                                };
+                                text.push_str(&format!("[{prefix}] {abbreviated}\n"));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        text
+    }
+
+    /// Cap summary at a character limit, cutting at the last complete line.
+    fn cap_summary(text: &str, max_chars: usize) -> String {
+        if text.chars().count() <= max_chars {
+            return text.to_string();
+        }
+        // Find the last newline before the limit.
+        let chars: Vec<char> = text.chars().collect();
+        let mut cut_at = max_chars;
+        while cut_at > 0 && chars[cut_at] != '\n' {
+            cut_at -= 1;
+        }
+        if cut_at == 0 {
+            // No newline found; cut at limit.
+            chars[..max_chars].iter().collect()
+        } else {
+            chars[..cut_at].iter().collect()
+        }
+    }
+
+    /// Extractive fallback when LLM summarization fails.
+    /// Pulls out user messages and short assistant responses.
+    fn extractive_fallback(messages: &[ChatMessage]) -> String {
+        let mut lines = Vec::new();
+        for msg in messages {
+            if let MessageContent::Text(s) = &msg.content {
+                if msg.role == "user" && !s.is_empty() {
+                    lines.push(format!("- [user] {}", truncate_str(s, 80)));
+                } else if msg.role == "assistant" && s.len() < 100 && !s.is_empty() {
+                    lines.push(format!("- [assistant] {s}"));
+                }
+            }
+        }
+        // Keep last 6 lines.
+        let start = lines.len().saturating_sub(6);
+        lines[start..].join("\n")
+    }
+
     /// Remove oldest messages to stay within `max_history`.
     /// Returns the dropped messages for potential compaction.
+    ///
+    /// Uses a hybrid strategy:
+    /// 1. Message count limit (max_history)
+    /// 2. Estimated token limit (~16K tokens of history)
     ///
     /// After trimming, ensures the history doesn't start with orphaned
     /// tool_result or assistant tool_use messages (which would cause Claude
@@ -488,18 +652,52 @@ impl ConversationSession {
     fn trim_history(&mut self) -> Vec<ChatMessage> {
         let mut dropped = Vec::new();
 
+        // Phase 1: Count-based trim.
         if self.history.len() > self.max_history {
             let excess = self.history.len() - self.max_history;
             dropped = self.history.drain(..excess).collect();
         }
 
-        // Drop leading messages until we start with a clean user text or
+        // Phase 2: Token-based trim — estimate and drop if over budget.
+        // Rough estimate: 1 token ≈ 3.5 chars for mixed Korean/English.
+        const CHARS_PER_TOKEN: f32 = 3.5;
+        let total_chars: usize = self.history.iter().map(Self::estimate_message_chars).sum();
+        let estimated_tokens = (total_chars as f32 / CHARS_PER_TOKEN) as usize;
+
+        if estimated_tokens > self.max_context_tokens {
+            // Drop oldest messages until we're under budget.
+            let target_chars = (self.max_context_tokens as f32 * CHARS_PER_TOKEN) as usize;
+            let mut current_chars = total_chars;
+            while current_chars > target_chars && !self.history.is_empty() {
+                let msg = self.history.remove(0);
+                current_chars -= Self::estimate_message_chars(&msg);
+                dropped.push(msg);
+            }
+        }
+
+        // Phase 3: Drop leading messages until we start with a clean user text or
         // assistant text message (not a tool_result or tool_use block).
         while !self.history.is_empty() && self.is_tool_message(0) {
             dropped.push(self.history.remove(0));
         }
 
         dropped
+    }
+
+    /// Estimate character count of a message (for token budget estimation).
+    fn estimate_message_chars(msg: &ChatMessage) -> usize {
+        match &msg.content {
+            MessageContent::Text(s) => s.len(),
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .map(|b| match b {
+                    ContentBlock::Text { text } => text.len(),
+                    ContentBlock::ToolUse { input, .. } => input.to_string().len(),
+                    ContentBlock::ToolResult { content, .. } => content.len(),
+                    _ => 0,
+                })
+                .sum(),
+        }
     }
 
     /// Check if the message at `index` is a tool-related message
@@ -525,6 +723,12 @@ impl ConversationSession {
     /// Add extra tool definitions (e.g. from MCP servers) to this session.
     pub fn add_tools(&mut self, extra: Vec<ToolDefinition>) {
         self.tools.extend(extra);
+    }
+
+    /// Configure compaction limits from SamConfig.
+    pub fn set_compaction_limits(&mut self, max_context_tokens: usize, max_summary_chars: usize) {
+        self.max_context_tokens = max_context_tokens;
+        self.max_summary_chars = max_summary_chars;
     }
 }
 
@@ -592,5 +796,109 @@ mod tests {
             MessageContent::Text(s) => assert_eq!(s, "It's noon"),
             _ => panic!("first message should be clean text, got: {:?}", session.history[0]),
         }
+    }
+
+    #[test]
+    fn token_based_trim_drops_large_messages() {
+        let mut session = ConversationSession::new(
+            "+821012345678",
+            "system prompt".to_string(),
+            100, // high message count limit — won't trigger count-based trim
+        );
+        // Set low token limit to trigger token-based trim.
+        session.max_context_tokens = 100; // ~350 chars budget
+
+        // Add messages totaling much more than 350 chars.
+        session.history.push(ChatMessage::text("user", &"a".repeat(200)));
+        session.history.push(ChatMessage::text("assistant", &"b".repeat(200)));
+        session.history.push(ChatMessage::text("user", &"c".repeat(200)));
+
+        let dropped = session.trim_history();
+        assert!(!dropped.is_empty());
+        // Should have some messages remaining.
+        assert!(!session.history.is_empty());
+    }
+
+    #[test]
+    fn cap_summary_respects_line_boundary() {
+        let text = "line1\nline2\nline3\nline4\nline5";
+        let capped = ConversationSession::cap_summary(text, 18);
+        // Should cut at a newline boundary.
+        assert!(capped.ends_with("line2") || capped.ends_with("line3"));
+        assert!(capped.len() <= 18);
+    }
+
+    #[test]
+    fn format_messages_includes_tool_use() {
+        let messages = vec![
+            ChatMessage::text("user", "시간 알려줘"),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::ToolUse {
+                        id: "t1".to_string(),
+                        name: "current_time".to_string(),
+                        input: serde_json::json!({}),
+                    },
+                ]),
+            },
+            ChatMessage::tool_result("t1", "2026-04-28 10:00", false),
+        ];
+
+        let formatted = ConversationSession::format_messages_for_summary(&messages);
+        assert!(formatted.contains("[user] 시간 알려줘"));
+        assert!(formatted.contains("[tool:current_time]"));
+        assert!(formatted.contains("[result] 2026-04-28 10:00"));
+    }
+
+    #[test]
+    fn extractive_fallback_keeps_recent() {
+        let messages: Vec<ChatMessage> = (0..10)
+            .map(|i| ChatMessage::text("user", &format!("message {i}")))
+            .collect();
+
+        let fallback = ConversationSession::extractive_fallback(&messages);
+        // Should keep last 6.
+        assert!(fallback.contains("message 4"));
+        assert!(fallback.contains("message 9"));
+        assert!(!fallback.contains("message 3"));
+    }
+
+    #[test]
+    fn truncate_str_at_word_boundary() {
+        let s = "hello world this is a test";
+        let truncated = truncate_str(s, 12);
+        // "hello world " is 12 chars, truncates at that word boundary
+        assert_eq!(truncated, "hello world...");
+
+        let truncated2 = truncate_str(s, 8);
+        // Cuts at space before position 8
+        assert_eq!(truncated2, "hello...");
+    }
+
+    #[test]
+    fn truncate_str_short_string_unchanged() {
+        let s = "short";
+        assert_eq!(truncate_str(s, 100), "short");
+    }
+
+    #[test]
+    fn effective_prompt_includes_handoff_and_summary() {
+        let mut session = ConversationSession::new(
+            "test",
+            "base prompt".to_string(),
+            20,
+        );
+        session.handoff_context = Some("handoff info".to_string());
+        session.context_summary = Some("summary info".to_string());
+
+        let effective = session.effective_system_prompt();
+        assert!(effective.contains("base prompt"));
+        assert!(effective.contains("handoff info"));
+        assert!(effective.contains("summary info"));
+        // Handoff should come before summary.
+        let handoff_pos = effective.find("handoff info").unwrap();
+        let summary_pos = effective.find("summary info").unwrap();
+        assert!(handoff_pos < summary_pos);
     }
 }

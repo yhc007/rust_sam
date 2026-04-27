@@ -485,6 +485,10 @@ pub async fn run() -> i32 {
                             if !router_plugin_tool_defs.is_empty() {
                                 s.add_tools(router_plugin_tool_defs.clone());
                             }
+                            s.set_compaction_limits(
+                                router_config.llm.max_context_tokens,
+                                router_config.llm.max_summary_chars,
+                            );
                             sessions.insert(session_key.clone(), s);
                         }
 
@@ -511,6 +515,10 @@ pub async fn run() -> i32 {
                             if !router_plugin_tool_defs.is_empty() {
                                 s.add_tools(router_plugin_tool_defs.clone());
                             }
+                            s.set_compaction_limits(
+                                router_config.llm.max_context_tokens,
+                                router_config.llm.max_summary_chars,
+                            );
                             sessions.insert(session_key.clone(), s);
                         }
 
@@ -823,6 +831,10 @@ pub async fn run() -> i32 {
                                         if !router_plugin_tool_defs.is_empty() {
                                             s.add_tools(router_plugin_tool_defs.clone());
                                         }
+                                        s.set_compaction_limits(
+                                            router_config.llm.max_context_tokens,
+                                            router_config.llm.max_summary_chars,
+                                        );
                                         s.set_handoff_context(combined_context.clone());
                                         sessions.insert(target_key, s);
                                     }

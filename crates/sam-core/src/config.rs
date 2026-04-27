@@ -118,6 +118,13 @@ pub struct LlmConfig {
     pub temperature: f32,
     #[serde(default = "LlmConfig::default_history")]
     pub max_history: usize,
+    /// Maximum estimated tokens for conversation history before compaction.
+    /// History exceeding this is trimmed and summarized. Default: 16000.
+    #[serde(default = "LlmConfig::default_max_context_tokens")]
+    pub max_context_tokens: usize,
+    /// Maximum characters for the rolling context summary. Default: 1200.
+    #[serde(default = "LlmConfig::default_max_summary_chars")]
+    pub max_summary_chars: usize,
     /// Seconds before sending "..." ack message while waiting for LLM.
     /// 0 = disabled.
     #[serde(default = "LlmConfig::default_ack_delay")]
@@ -134,6 +141,8 @@ impl LlmConfig {
     fn default_retries() -> u32 { 3 }
     fn default_temperature() -> f32 { 0.7 }
     fn default_history() -> usize { 20 }
+    fn default_max_context_tokens() -> usize { 16_000 }
+    fn default_max_summary_chars() -> usize { 1200 }
     fn default_ack_delay() -> u64 { 5 }
 }
 
@@ -150,6 +159,8 @@ impl Default for LlmConfig {
             max_retries: Self::default_retries(),
             temperature: Self::default_temperature(),
             max_history: Self::default_history(),
+            max_context_tokens: Self::default_max_context_tokens(),
+            max_summary_chars: Self::default_max_summary_chars(),
             ack_delay_secs: Self::default_ack_delay(),
         }
     }
