@@ -17,7 +17,7 @@ use sam_claude::{
     SamClaudeClient, TokenBudget, XaiClient,
 };
 use sam_claude::whisper;
-use sam_core::{config_path, load_config, AgentStore, CronStore, DeliveryQueue, FlowStore, SkillStore, run_hot_reload};
+use sam_core::{config_path, load_config, AgentStore, CronStore, DeliveryQueue, FlowStore, PluginStore, SkillStore, run_hot_reload};
 use sam_memory_adapter::MemoryAdapter;
 use base64::Engine as _;
 use sam_imessage::outbound::run_sender;
@@ -177,6 +177,16 @@ pub async fn run() -> i32 {
         }).collect()
     };
 
+    // Plugin store (distributable tool/agent/script packages).
+    let plugin_store = Arc::new(Mutex::new(PluginStore::load()));
+    let plugin_tool_defs: Vec<sam_claude::types::ToolDefinition> = {
+        let store = plugin_store.lock().await;
+        store.tool_definitions_raw().into_iter().map(|(name, description, input_schema)| {
+            sam_claude::types::ToolDefinition { name, description, input_schema }
+        }).collect()
+    };
+    info!(plugins = plugin_tool_defs.len(), "Plugin tool definitions loaded");
+
     // Agent store (multi-agent routing).
     let agent_store = Arc::new(Mutex::new(AgentStore::load()));
 
@@ -328,6 +338,8 @@ pub async fn run() -> i32 {
     let router_mcp_tool_defs = mcp_tool_defs.clone();
     let router_skill_store = Arc::clone(&skill_store);
     let router_skill_tool_defs = skill_tool_defs.clone();
+    let router_plugin_store = Arc::clone(&plugin_store);
+    let router_plugin_tool_defs = plugin_tool_defs.clone();
     let router_agent_store = Arc::clone(&agent_store);
     let router_handle = tokio::spawn(async move {
         let mut sessions: HashMap<String, ConversationSession> = HashMap::new();
@@ -470,6 +482,9 @@ pub async fn run() -> i32 {
                             if !router_skill_tool_defs.is_empty() {
                                 s.add_tools(router_skill_tool_defs.clone());
                             }
+                            if !router_plugin_tool_defs.is_empty() {
+                                s.add_tools(router_plugin_tool_defs.clone());
+                            }
                             sessions.insert(session_key.clone(), s);
                         }
 
@@ -492,6 +507,9 @@ pub async fn run() -> i32 {
                             }
                             if !router_skill_tool_defs.is_empty() {
                                 s.add_tools(router_skill_tool_defs.clone());
+                            }
+                            if !router_plugin_tool_defs.is_empty() {
+                                s.add_tools(router_plugin_tool_defs.clone());
                             }
                             sessions.insert(session_key.clone(), s);
                         }
@@ -575,6 +593,7 @@ pub async fn run() -> i32 {
                             Some(&cron_store),
                             Some(&router_flow_store),
                             Some(&router_skill_store),
+                            Some(&router_plugin_store),
                         ).await;
 
                         if let super::slash_commands::SlashResult::Handled(response) = slash_result {
@@ -807,10 +826,12 @@ pub async fn run() -> i32 {
     let shared_config = Arc::new(Mutex::new(config.clone()));
     let reload_flow_store = Arc::clone(&flow_store);
     let reload_skill_store = Arc::clone(&skill_store);
+    let reload_plugin_store = Arc::clone(&plugin_store);
     let reload_handle = tokio::spawn(async move {
-        // Spawn a sub-task that periodically reloads the skill store.
+        // Spawn a sub-task that periodically reloads the skill store and plugin store.
         let skill_cancel = reload_cancel.clone();
         let skill_store_ref = reload_skill_store;
+        let plugin_store_ref = reload_plugin_store;
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(10));
             loop {
@@ -819,6 +840,9 @@ pub async fn run() -> i32 {
                     _ = interval.tick() => {
                         let mut store = skill_store_ref.lock().await;
                         store.reload();
+                        drop(store);
+                        let mut pstore = plugin_store_ref.lock().await;
+                        pstore.reload();
                     }
                 }
             }

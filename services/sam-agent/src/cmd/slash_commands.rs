@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use chrono::TimeZone;
-use sam_core::{CronStore, FlowStore, SamConfig, SkillStore};
+use sam_core::{CronStore, FlowStore, PluginStore, SamConfig, SkillStore};
 use sam_claude::TokenBudget;
 
 /// Result of attempting to handle a slash command.
@@ -28,6 +28,7 @@ pub async fn try_handle(
     cron_store: Option<&Arc<Mutex<CronStore>>>,
     flow_store: Option<&Arc<Mutex<FlowStore>>>,
     skill_store: Option<&Arc<Mutex<SkillStore>>>,
+    plugin_store: Option<&Arc<Mutex<PluginStore>>>,
 ) -> SlashResult {
     let trimmed = text.trim();
 
@@ -53,6 +54,8 @@ pub async fn try_handle(
         "/skill" => SlashResult::Handled(cmd_skill_detail(arg, skill_store).await),
         "/agent" | "/에이전트" => SlashResult::Handled(cmd_agent(arg).await),
         "/agents" | "/에이전트목록" => SlashResult::Handled(cmd_agents_list().await),
+        "/plugins" | "/플러그인" => SlashResult::Handled(cmd_plugins(plugin_store).await),
+        "/plugin" => SlashResult::Handled(cmd_plugin_action(arg, plugin_store).await),
         _ => {
             // Unknown slash command — don't swallow, might be user text
             // Only swallow commands that look intentional (single word)
@@ -379,7 +382,139 @@ async fn cmd_skill_detail(name: &str, skill_store: Option<&Arc<Mutex<SkillStore>
     format!("'{}' 스킬을 ��을 수 없어. /skills 로 목록 확인해봐.", name)
 }
 
-// ── Helpers ────���─────────────────────────────────────────────────────────
+// ── Plugin commands ──────────────────────────────────────────────────────
+
+async fn cmd_plugins(plugin_store: Option<&Arc<Mutex<PluginStore>>>) -> String {
+    let store = match plugin_store {
+        Some(s) => s.lock().await,
+        None => return "플러그인 시스템이 비활성화되어 있어.".to_string(),
+    };
+
+    let plugins = store.list();
+    if plugins.is_empty() {
+        return "🔌 설치된 플러그인 없음\n\n\
+             ~/.sam/plugins/ 에 플러그인 디렉토리를 추가하면 자동으로 로드돼.\n\
+             /plugin help 로 자세한 사용법 확인.".to_string();
+    }
+
+    let mut output = format!("🔌 플러그인 목록 ({}/{}개 활성)\n\n",
+        store.enabled().len(), plugins.len());
+
+    for p in &plugins {
+        let status = if p.manifest.enabled { "✅" } else { "⏸️" };
+        output.push_str(&format!(
+            "{status} {} v{} — {}\n   도구: {}개, 에이전트: {}개\n",
+            p.manifest.name,
+            p.manifest.version,
+            p.manifest.description,
+            p.tools.len(),
+            p.agents.len(),
+        ));
+
+        let missing = p.check_requirements();
+        if !missing.is_empty() {
+            output.push_str(&format!("   ⚠️ 미충족 요구사항: {}\n", missing.join(", ")));
+        }
+    }
+
+    output
+}
+
+async fn cmd_plugin_action(arg: &str, plugin_store: Option<&Arc<Mutex<PluginStore>>>) -> String {
+    let parts: Vec<&str> = arg.splitn(2, ' ').collect();
+    let action = parts.first().copied().unwrap_or("help");
+    let name = parts.get(1).copied().unwrap_or("");
+
+    match action {
+        "enable" => {
+            if name.is_empty() {
+                return "사용법: /plugin enable <이름>".to_string();
+            }
+            let store = match plugin_store {
+                Some(s) => s,
+                None => return "플러그인 시스템 비활성.".to_string(),
+            };
+            let mut s = store.lock().await;
+            if s.set_enabled(name, true) {
+                format!("✅ '{}' 플러그인 활성화됨", name)
+            } else {
+                format!("'{}' 플러그인을 찾을 수 없어.", name)
+            }
+        }
+        "disable" => {
+            if name.is_empty() {
+                return "사용법: /plugin disable <이름>".to_string();
+            }
+            let store = match plugin_store {
+                Some(s) => s,
+                None => return "플러그인 시스템 비활성.".to_string(),
+            };
+            let mut s = store.lock().await;
+            if s.set_enabled(name, false) {
+                format!("⏸️ '{}' 플러그인 비활성화됨", name)
+            } else {
+                format!("'{}' 플러그인을 찾을 수 없어.", name)
+            }
+        }
+        "reload" => {
+            let store = match plugin_store {
+                Some(s) => s,
+                None => return "플러그인 시스템 비활성.".to_string(),
+            };
+            let mut s = store.lock().await;
+            s.reload();
+            format!("🔄 플러그인 리로드 완료 ({}개)", s.list().len())
+        }
+        "info" => {
+            if name.is_empty() {
+                return "사용법: /plugin info <이름>".to_string();
+            }
+            let store = match plugin_store {
+                Some(s) => s,
+                None => return "플러그인 시스템 비활성.".to_string(),
+            };
+            let s = store.lock().await;
+            match s.get(name) {
+                Some(p) => {
+                    let mut out = format!(
+                        "🔌 {} v{}\n{}\n작성자: {}\n상태: {}\n경로: {}\n\n",
+                        p.manifest.name,
+                        p.manifest.version,
+                        p.manifest.description,
+                        p.manifest.author,
+                        if p.manifest.enabled { "활성" } else { "비활성" },
+                        p.path.display(),
+                    );
+                    if !p.tools.is_empty() {
+                        out.push_str("도구:\n");
+                        for t in &p.tools {
+                            out.push_str(&format!("  • {} — {}\n", t.name, t.description));
+                        }
+                    }
+                    if !p.agents.is_empty() {
+                        out.push_str("에이전트:\n");
+                        for a in &p.agents {
+                            out.push_str(&format!("  • {} — {}\n", a.name, a.description));
+                        }
+                    }
+                    out
+                }
+                None => format!("'{}' 플러그인을 찾을 수 없어.", name),
+            }
+        }
+        _ => {
+            "🔌 플러그인 명령어\n\n\
+             /plugins — 설치된 플러그인 목록\n\
+             /plugin info <이름> — 상세 정보\n\
+             /plugin enable <이름> — 활성화\n\
+             /plugin disable <이름> — 비활성화\n\
+             /plugin reload — 전체 리로드"
+                .to_string()
+        }
+    }
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────
 
 fn format_tokens(tokens: u64) -> String {
     if tokens >= 1_000_000 {

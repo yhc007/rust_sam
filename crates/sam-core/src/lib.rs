@@ -12,6 +12,7 @@ pub mod flow;
 pub mod flow_store;
 pub mod hot_reload;
 pub mod paths;
+pub mod plugin;
 pub mod skill_store;
 pub mod tier;
 
@@ -27,6 +28,7 @@ pub use flow::{FlowDef, FlowStep, FlowTrigger};
 pub use flow_store::{FlowStore, flows_dir};
 pub use hot_reload::{run_hot_reload, SharedConfig};
 pub use paths::{config_path, expand_tilde, prompts_dir, sam_home, state_dir, tools_dir};
+pub use plugin::{Plugin, PluginManifest, PluginStore, plugins_dir};
 pub use skill_store::{CustomSkill, SkillExec, SkillStore, interpolate_args};
 pub use tier::Tier;
 
