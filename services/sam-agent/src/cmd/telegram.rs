@@ -190,8 +190,12 @@ pub async fn run() -> i32 {
                     client.as_ref(),
                     &mut budget,
                     &text,
+                    &[],
                     memory.as_mut(),
                     &config,
+                    None,
+                    None,
+                    None,
                     None,
                 )
                 .await

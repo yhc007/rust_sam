@@ -1,16 +1,18 @@
 //! Conversation session — manages history, budget, and Claude round-trips
 //! with tool_use support.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use sam_core::{CronStore, SamConfig};
+use sam_core::{state_dir, CronStore, FlowStore, SamConfig};
 use sam_memory_adapter::MemoryAdapter;
 
 use crate::budget::TokenBudget;
 use crate::llm_client::LlmClient;
+use crate::mcp::McpClient;
 use crate::tools::{builtin_tool_definitions, execute_builtin, ToolContext, MAX_TOOL_ROUNDS};
 use crate::types::*;
 
@@ -31,6 +33,13 @@ pub struct ConversationSession {
     context_summary: Option<String>,
 }
 
+/// Serializable snapshot of session state for persistence.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SessionSnapshot {
+    history: Vec<ChatMessage>,
+    context_summary: Option<String>,
+}
+
 impl ConversationSession {
     /// Create a new conversation session.
     pub fn new(handle: &str, system_prompt: String, max_history: usize) -> Self {
@@ -44,19 +53,113 @@ impl ConversationSession {
         }
     }
 
+    /// Create a session with a filtered set of built-in tools.
+    /// `filter` determines which tools from `builtin_tool_definitions()` are included.
+    pub fn new_with_filter(
+        handle: &str,
+        system_prompt: String,
+        max_history: usize,
+        filter: &sam_core::ToolFilter,
+    ) -> Self {
+        let tools: Vec<ToolDefinition> = builtin_tool_definitions()
+            .into_iter()
+            .filter(|t| filter.allows(&t.name))
+            .collect();
+        Self {
+            handle: handle.to_string(),
+            history: Vec::new(),
+            max_history,
+            system_prompt,
+            tools,
+            context_summary: None,
+        }
+    }
+
+    /// Load a session from disk, falling back to a fresh session if the file
+    /// doesn't exist or cannot be parsed.
+    pub fn load(handle: &str, system_prompt: String, max_history: usize) -> Self {
+        let path = Self::session_path(handle);
+        if path.exists() {
+            match std::fs::read_to_string(&path) {
+                Ok(data) => match serde_json::from_str::<SessionSnapshot>(&data) {
+                    Ok(snap) => {
+                        info!(handle = %handle, path = %path.display(), "restored session from disk");
+                        return Self {
+                            handle: handle.to_string(),
+                            history: snap.history,
+                            max_history,
+                            system_prompt,
+                            tools: builtin_tool_definitions(),
+                            context_summary: snap.context_summary,
+                        };
+                    }
+                    Err(e) => {
+                        warn!(handle = %handle, error = %e, "failed to parse session file, starting fresh");
+                    }
+                },
+                Err(e) => {
+                    warn!(handle = %handle, error = %e, "failed to read session file, starting fresh");
+                }
+            }
+        }
+        Self::new(handle, system_prompt, max_history)
+    }
+
+    /// Persist the current session (history + context_summary) to disk.
+    pub fn save(&self) {
+        let path = Self::session_path(&self.handle);
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                warn!(error = %e, "failed to create sessions directory");
+                return;
+            }
+        }
+        let snap = SessionSnapshot {
+            history: self.history.clone(),
+            context_summary: self.context_summary.clone(),
+        };
+        match serde_json::to_string(&snap) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, json) {
+                    warn!(error = %e, "failed to write session file");
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to serialize session");
+            }
+        }
+    }
+
+    /// Return the filesystem path for a given handle's session file.
+    fn session_path(handle: &str) -> PathBuf {
+        let sanitized: String = handle
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        state_dir().join("sessions").join(format!("{sanitized}.json"))
+    }
+
     /// Send a user message and return the assistant's reply.
     ///
     /// Runs an agentic loop: if Claude responds with tool_use, the tools
     /// are executed and the results fed back until Claude produces a final
     /// text response (or the loop limit is reached).
+    ///
+    /// `images` contains (mime_type, base64_data) pairs for any image
+    /// attachments to include with the user message (Claude Vision).
+    #[allow(clippy::too_many_arguments)]
     pub async fn reply(
         &mut self,
         client: &dyn LlmClient,
         budget: &mut TokenBudget,
         user_text: &str,
+        images: &[(String, String)],
         memory: Option<&mut MemoryAdapter>,
         config: &SamConfig,
         cron_store: Option<Arc<Mutex<CronStore>>>,
+        flow_store: Option<Arc<Mutex<FlowStore>>>,
+        mcp_clients: Option<Arc<Mutex<Vec<McpClient>>>>,
+        skill_store: Option<Arc<Mutex<sam_core::SkillStore>>>,
     ) -> anyhow::Result<String> {
         // Trim history *before* adding the new message to prevent unbounded growth.
         // Compact dropped messages into context_summary.
@@ -65,8 +168,12 @@ impl ConversationSession {
             self.compact(client, &dropped).await;
         }
 
-        // Append user message.
-        self.history.push(ChatMessage::text("user", user_text));
+        // Append user message (with images if present).
+        if images.is_empty() {
+            self.history.push(ChatMessage::text("user", user_text));
+        } else {
+            self.history.push(ChatMessage::user_with_images(user_text, images));
+        }
 
         // Build effective system prompt (base + context summary).
         let effective_system = self.effective_system_prompt();
@@ -131,6 +238,10 @@ impl ConversationSession {
                         config,
                         cron_store: cron_store.clone(),
                         sender_handle: self.handle.clone(),
+                        flow_store: flow_store.clone(),
+                        llm_client: Some(client),
+                        mcp_clients: mcp_clients.clone(),
+                        skill_store: skill_store.clone(),
                     };
                     let result = execute_builtin(&tc.name, &tc.input, &mut ctx).await;
                     let (result_text, is_error) = match result {
@@ -302,6 +413,11 @@ impl ConversationSession {
     /// Read-only access to current history.
     pub fn history(&self) -> &[ChatMessage] {
         &self.history
+    }
+
+    /// Add extra tool definitions (e.g. from MCP servers) to this session.
+    pub fn add_tools(&mut self, extra: Vec<ToolDefinition>) {
+        self.tools.extend(extra);
     }
 }
 

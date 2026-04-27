@@ -28,6 +28,31 @@ impl ChatMessage {
         }
     }
 
+    /// Build a user message with text and optional inline images.
+    /// `images` is a slice of (mime_type, base64_data) pairs.
+    pub fn user_with_images(text: &str, images: &[(String, String)]) -> Self {
+        let mut blocks = Vec::new();
+        // Images first so Claude sees them before the text prompt.
+        for (mime_type, data) in images {
+            blocks.push(ContentBlock::Image {
+                source: ImageSource {
+                    source_type: "base64".to_string(),
+                    media_type: mime_type.clone(),
+                    data: data.clone(),
+                },
+            });
+        }
+        if !text.is_empty() {
+            blocks.push(ContentBlock::Text {
+                text: text.to_string(),
+            });
+        }
+        Self {
+            role: "user".to_string(),
+            content: MessageContent::Blocks(blocks),
+        }
+    }
+
     /// Build a tool_result message (role = "user").
     pub fn tool_result(tool_use_id: &str, result: &str, is_error: bool) -> Self {
         Self {
@@ -102,12 +127,26 @@ pub(crate) struct ClaudeApiResponse {
     pub usage: ApiUsage,
 }
 
-/// Content block in a message — text, tool_use, or tool_result.
+/// Source data for an inline image sent to the Claude Vision API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageSource {
+    /// Always "base64".
+    #[serde(rename = "type")]
+    pub source_type: String,
+    /// MIME type, e.g. "image/jpeg".
+    pub media_type: String,
+    /// Base64-encoded image data.
+    pub data: String,
+}
+
+/// Content block in a message — text, image, tool_use, or tool_result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
+    #[serde(rename = "image")]
+    Image { source: ImageSource },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,

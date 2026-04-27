@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sam Dashboard</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a0a; color: #e0e0e0; padding: 2rem; }
+h1 { font-size: 1.5rem; margin-bottom: 1.5rem; color: #fff; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem; }
+.card { background: #1a1a1a; border: 1px solid #333; border-radius: 12px; padding: 1.5rem; }
+.card h2 { font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.05em; color: #888; margin-bottom: 1rem; }
+.stat { font-size: 2rem; font-weight: 700; color: #fff; }
+.stat-label { font-size: 0.85rem; color: #888; margin-top: 0.25rem; }
+.stat-row { display: flex; gap: 2rem; margin-bottom: 0.75rem; }
+.stat-item { flex: 1; }
+.stat-item .num { font-size: 1.5rem; font-weight: 600; color: #fff; }
+.stat-item .label { font-size: 0.75rem; color: #888; }
+.bar { height: 8px; background: #333; border-radius: 4px; margin-top: 0.75rem; overflow: hidden; }
+.bar-fill { height: 100%; background: #4ade80; border-radius: 4px; transition: width 0.5s; }
+.bar-fill.warn { background: #fbbf24; }
+.bar-fill.danger { background: #ef4444; }
+.list { list-style: none; }
+.list li { padding: 0.5rem 0; border-bottom: 1px solid #222; font-size: 0.9rem; }
+.list li:last-child { border-bottom: none; }
+.badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; background: #333; margin-left: 0.5rem; }
+.badge.cron { background: #1e3a5f; color: #60a5fa; }
+.badge.manual { background: #3b2f1a; color: #fbbf24; }
+.badge.on { background: #1a3d1a; color: #4ade80; }
+.badge.off { background: #2d1515; color: #888; }
+.status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #4ade80; margin-right: 0.5rem; }
+.status-dot.error { background: #ef4444; }
+.status-dot.unknown { background: #888; }
+#error { display: none; background: #2d1515; border: 1px solid #ef4444; padding: 1rem; border-radius: 8px; margin-bottom: 1rem; color: #fca5a5; }
+</style>
+</head>
+<body>
+<h1><span class="status-dot" id="status-dot"></span>Sam Dashboard</h1>
+<div id="error"></div>
+<div class="grid">
+  <div class="card">
+    <h2>Runtime</h2>
+    <div id="runtime-info">Loading...</div>
+  </div>
+  <div class="card">
+    <h2>Token Budget</h2>
+    <div id="budget-info">Loading...</div>
+  </div>
+  <div class="card">
+    <h2>System</h2>
+    <div id="system-info">Loading...</div>
+  </div>
+  <div class="card">
+    <h2>Reminders</h2>
+    <ul class="list" id="reminders-list"><li>Loading...</li></ul>
+  </div>
+  <div class="card">
+    <h2>Flows</h2>
+    <ul class="list" id="flows-list"><li>Loading...</li></ul>
+  </div>
+</div>
+<script>
+function formatUptime(secs) {
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.floor(secs/60)}m ${secs%60}s`;
+  const h = Math.floor(secs/3600);
+  const m = Math.floor((secs%3600)/60);
+  return `${h}h ${m}m`;
+}
+
+function timeAgo(unix) {
+  if (!unix) return 'never';
+  const diff = Math.floor(Date.now()/1000) - unix;
+  if (diff < 60) return `${diff}s ago`;
+  if (diff < 3600) return `${Math.floor(diff/60)}m ago`;
+  return `${Math.floor(diff/3600)}h ago`;
+}
+
+async function refresh() {
+  try {
+    const res = await fetch('/api/dashboard');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    document.getElementById('error').style.display = 'none';
+
+    const r = data.runtime;
+    const isLive = r.uptime_secs > 0;
+    document.getElementById('status-dot').className = `status-dot ${isLive ? '' : 'unknown'}`;
+
+    // Runtime
+    document.getElementById('runtime-info').innerHTML = `
+      <div class="stat">${formatUptime(r.uptime_secs)}</div>
+      <div class="stat-label">uptime</div>
+      <div class="stat-row" style="margin-top:1rem">
+        <div class="stat-item"><div class="num">${r.messages_received}</div><div class="label">received</div></div>
+        <div class="stat-item"><div class="num">${r.messages_sent}</div><div class="label">sent</div></div>
+        <div class="stat-item"><div class="num">${r.errors_total}</div><div class="label">errors</div></div>
+      </div>
+      <div style="font-size:0.85rem;color:#888;margin-top:0.5rem">
+        Last message: ${timeAgo(r.last_message_at)}<br>
+        Heartbeats: ${r.heartbeat_sent} |
+        MCP: ${r.mcp_servers} server${r.mcp_servers !== 1 ? 's' : ''} |
+        Whisper: <span class="badge ${r.whisper_enabled ? 'on' : 'off'}">${r.whisper_enabled ? 'ON' : 'OFF'}</span>
+      </div>
+    `;
+
+    // System
+    document.getElementById('system-info').innerHTML = `
+      <div><strong>Provider:</strong> ${data.health.provider}</div>
+      <div><strong>Model:</strong> ${data.health.model}</div>
+      <div><strong>Version:</strong> ${data.health.version}</div>
+    `;
+
+    // Budget
+    const b = data.budget;
+    const barClass = b.percentage_used > 90 ? 'danger' : b.percentage_used > 70 ? 'warn' : '';
+    document.getElementById('budget-info').innerHTML = `
+      <div class="stat">${(b.remaining / 1000).toFixed(0)}K</div>
+      <div class="stat-label">tokens remaining</div>
+      <div class="bar"><div class="bar-fill ${barClass}" style="width:${b.percentage_used}%"></div></div>
+      <div style="margin-top:0.5rem;font-size:0.85rem;color:#888">${(b.used_today/1000).toFixed(0)}K used / ${(b.daily_limit/1000).toFixed(0)}K limit</div>
+    `;
+
+    // Reminders
+    const rl = document.getElementById('reminders-list');
+    if (data.reminders.length === 0) {
+      rl.innerHTML = '<li style="color:#666">No active reminders</li>';
+    } else {
+      rl.innerHTML = data.reminders.map(r => `<li>${r.message} <span class="badge cron">${r.schedule}</span></li>`).join('');
+    }
+
+    // Flows
+    const fl = document.getElementById('flows-list');
+    if (data.flows.length === 0) {
+      fl.innerHTML = '<li style="color:#666">No flows configured</li>';
+    } else {
+      fl.innerHTML = data.flows.map(f => {
+        const badge = f.trigger === 'manual' ? 'manual' : 'cron';
+        return `<li>${f.name} — ${f.description} <span class="badge ${badge}">${f.trigger}</span> (${f.steps} steps)</li>`;
+      }).join('');
+    }
+  } catch (e) {
+    document.getElementById('error').style.display = 'block';
+    document.getElementById('error').textContent = `Connection error: ${e.message}`;
+    document.getElementById('status-dot').className = 'status-dot error';
+  }
+}
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>

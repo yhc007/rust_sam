@@ -48,6 +48,7 @@ thiserror = "1"
 anyhow = "1"
 dirs = "5"
 walkdir = "2"
+base64 = "0.22"
 
 # Memory brain (submodule)
 memory-actor = { path = "vendor/memory-brain/crates/memory-actor" }

@@ -45,6 +45,13 @@ pub enum Command {
         port: u16,
     },
 
+    /// Run the health monitoring dashboard.
+    Dashboard {
+        /// Port to listen on (default: 3100).
+        #[arg(short, long, default_value = "3100")]
+        port: u16,
+    },
+
     /// Signal a running Sam to reload config/prompts. Stub in M1.
     Reload,
 

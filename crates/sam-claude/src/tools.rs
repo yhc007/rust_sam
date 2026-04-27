@@ -14,8 +14,12 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use sam_core::{CronSchedule, CronStore, SamConfig, new_job, parse_datetime_to_unix};
+use sam_core::{CronSchedule, CronStore, FlowStore, SamConfig, SkillStore, new_job, parse_datetime_to_unix, interpolate_args};
 use sam_memory_adapter::MemoryAdapter;
+
+use crate::flow_runner::run_flow;
+use crate::llm_client::LlmClient;
+use crate::mcp::McpClient;
 
 use crate::types::ToolDefinition;
 
@@ -32,6 +36,14 @@ pub struct ToolContext<'a> {
     pub cron_store: Option<Arc<Mutex<CronStore>>>,
     /// The iMessage handle of the user sending the message (for scheduling).
     pub sender_handle: String,
+    /// Flow store for listing/running flows.
+    pub flow_store: Option<Arc<Mutex<FlowStore>>>,
+    /// LLM client reference for flow execution.
+    pub llm_client: Option<&'a dyn LlmClient>,
+    /// MCP server clients for external tool dispatch.
+    pub mcp_clients: Option<Arc<Mutex<Vec<McpClient>>>>,
+    /// Custom skill store for user-defined tools.
+    pub skill_store: Option<Arc<Mutex<SkillStore>>>,
 }
 
 /// Return the list of built-in tool definitions for the Claude API.
@@ -250,6 +262,86 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 }
             }),
         },
+        ToolDefinition {
+            name: "run_flow".to_string(),
+            description: "등록된 플로우(워크플로우)를 실행한다. 여러 단계를 순서대로 수행하는 자동화 파이프라인.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "실행할 플로우 이름"
+                    }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDefinition {
+            name: "list_flows".to_string(),
+            description: "등록된 플로우(워크플로우) 목록을 보여준다.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDefinition {
+            name: "handoff_to_agent".to_string(),
+            description: "현재 대화를 다른 전문 에이전트에게 넘긴다. 코딩은 coder, 검색은 researcher, 일정은 scheduler에게.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "agent": {
+                        "type": "string",
+                        "description": "넘길 에이전트 이름 (coder, researcher, scheduler, default)"
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "인수인계 맥락 (다음 에이전트가 알아야 할 정보)"
+                    }
+                },
+                "required": ["agent"]
+            }),
+        },
+        ToolDefinition {
+            name: "browser".to_string(),
+            description: "웹 브라우저를 제어한다. 페이지 방문, 내용 추출, 스크린샷 가능.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "수행할 액션: navigate (URL 방문 + 내용 반환), screenshot (페이지 캡처), extract (CSS 선택자로 특정 요소 추출)"
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "방문할 URL"
+                    },
+                    "selector": {
+                        "type": "string",
+                        "description": "추출할 CSS 선택자 (extract 시)"
+                    }
+                },
+                "required": ["action", "url"]
+            }),
+        },
+        ToolDefinition {
+            name: "notion_create_page".to_string(),
+            description: "Notion에 새 페이지를 생성한다. 메모, 문서, 아이디어 정리 등에 사용.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "페이지 제목"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "페이지 내용 (텍스트)"
+                    }
+                },
+                "required": ["title", "content"]
+            }),
+        },
     ]
 }
 
@@ -261,6 +353,20 @@ pub async fn execute_builtin(
 ) -> Result<String, String> {
     info!(tool = name, "executing built-in tool");
 
+    match name {
+        "run_flow" => exec_run_flow(input, ctx).await,
+        "list_flows" => exec_list_flows(ctx).await,
+        _ => execute_builtin_no_flow(name, input, ctx).await,
+    }
+}
+
+/// Execute a built-in tool excluding flow tools. Used by flow_runner to
+/// avoid async recursion (run_flow → execute_builtin → run_flow).
+pub async fn execute_builtin_no_flow(
+    name: &str,
+    input: &serde_json::Value,
+    ctx: &mut ToolContext<'_>,
+) -> Result<String, String> {
     match name {
         "memory_recall" => exec_memory_recall(input, ctx),
         "memory_store" => exec_memory_store(input, ctx),
@@ -274,7 +380,33 @@ pub async fn execute_builtin(
         "schedule_reminder" => exec_schedule_reminder(input, ctx).await,
         "list_reminders" => exec_list_reminders(ctx).await,
         "cancel_reminder" => exec_cancel_reminder(input, ctx).await,
-        _ => Err(format!("unknown tool: {name}")),
+        "notion_create_page" => exec_notion_create_page(input, ctx).await,
+        "handoff_to_agent" => exec_handoff(input),
+        "browser" => exec_browser(input, ctx).await,
+        _ => {
+            // Try custom skill store first.
+            if let Some(skill_store) = &ctx.skill_store {
+                let store = skill_store.lock().await;
+                if let Some(skill) = store.get(name).cloned() {
+                    drop(store); // release lock before executing
+                    info!(tool = name, command = %skill.exec.command, "dispatching to custom skill");
+                    return execute_custom_skill(&skill, input).await;
+                }
+            }
+
+            // Try MCP servers for unknown tool names.
+            if let Some(mcp_clients) = &ctx.mcp_clients {
+                let mut clients = mcp_clients.lock().await;
+                for client in clients.iter_mut() {
+                    if client.has_tool(name) {
+                        info!(tool = name, mcp_server = %client.name, "dispatching to MCP server");
+                        return client.call_tool(name, input.clone()).await
+                            .map_err(|e| format!("MCP tool error: {e}"));
+                    }
+                }
+            }
+            Err(format!("unknown tool: {name}"))
+        }
     }
 }
 
@@ -645,6 +777,12 @@ async fn exec_twitter_search(
 // ── Web search ──────────────────────────────────────────────────────────
 
 /// Load a secret from a source string (env:VAR or file:PATH).
+/// Load an API key from a source specifier (env:VAR or file:/path).
+/// Public alias for use by other modules in this crate.
+pub fn load_key_from_source_pub(source: &str) -> Result<String, String> {
+    load_key_from_source(source)
+}
+
 fn load_key_from_source(source: &str) -> Result<String, String> {
     if let Some(var_name) = source.strip_prefix("env:") {
         return std::env::var(var_name)
@@ -912,6 +1050,374 @@ async fn exec_cancel_reminder(
     Err("'id' 또는 'query' 중 하나를 지정해줘.".to_string())
 }
 
+// ── Flow tools ───────────────────────────────────────────────────────────
+
+async fn exec_run_flow(
+    input: &serde_json::Value,
+    ctx: &mut ToolContext<'_>,
+) -> Result<String, String> {
+    let flow_store_arc = ctx.flow_store.as_ref().ok_or("flow system unavailable")?.clone();
+    let llm_client = ctx.llm_client.ok_or("LLM client unavailable for flow execution")?;
+    let name = input["name"].as_str().ok_or("missing 'name' parameter")?;
+
+    let flow = {
+        let store = flow_store_arc.lock().await;
+        store.get(name).cloned()
+    };
+
+    let flow = flow.ok_or(format!("플로우 '{name}'을 찾을 수 없어. list_flows로 목록을 확인해봐."))?;
+
+    info!(flow = %flow.name, "running flow via tool");
+
+    let result = run_flow(
+        &flow,
+        llm_client,
+        ctx.memory.as_deref_mut(),
+        ctx.config,
+        ctx.cron_store.clone(),
+        &ctx.sender_handle,
+    )
+    .await;
+
+    if result.success {
+        let mut output = format!("플로우 '{}' 완료!\n\n", flow.name);
+        for step in &flow.steps {
+            let step_name = step.step_name();
+            if let Some(val) = result.outputs.get(step_name) {
+                let truncated = if val.len() > 500 {
+                    format!("{}...", &val[..500])
+                } else {
+                    val.clone()
+                };
+                output.push_str(&format!("[{step_name}] {truncated}\n"));
+            }
+        }
+        Ok(output)
+    } else {
+        Err(result.error.unwrap_or_else(|| "unknown error".to_string()))
+    }
+}
+
+async fn exec_list_flows(ctx: &ToolContext<'_>) -> Result<String, String> {
+    let flow_store_arc = ctx.flow_store.as_ref().ok_or("flow system unavailable")?;
+    let store = flow_store_arc.lock().await;
+    let flows = store.list();
+
+    if flows.is_empty() {
+        return Ok("등록된 플로우가 없어. ~/.sam/flows/ 디렉토리에 TOML 파일을 추가해줘.".to_string());
+    }
+
+    let mut result = format!("등록된 플로우 {}건:\n\n", flows.len());
+    for flow in flows {
+        let trigger = match &flow.trigger {
+            sam_core::FlowTrigger::Manual => "수동".to_string(),
+            sam_core::FlowTrigger::Cron { expr } => format!("🔁 {expr}"),
+        };
+        result.push_str(&format!(
+            "• {} — {} (트리거: {}, 단계 {}개)\n",
+            flow.name, flow.description, trigger, flow.steps.len()
+        ));
+    }
+
+    Ok(result)
+}
+
+// ── Notion ──────────────────────────────────────────────────────────────
+
+async fn exec_notion_create_page(
+    input: &serde_json::Value,
+    ctx: &ToolContext<'_>,
+) -> Result<String, String> {
+    if !ctx.config.notion.enabled {
+        return Err("Notion 기능이 비활성화되어 있어. config.toml에서 [notion] enabled = true로 설정해줘.".to_string());
+    }
+
+    let title = input["title"].as_str().ok_or("missing 'title' parameter")?;
+    let content = input["content"].as_str().ok_or("missing 'content' parameter")?;
+
+    let api_key = ctx.config.notion.api_key_source
+        .as_deref()
+        .ok_or("Notion API 키 소스가 설정되지 않았어.")?;
+    let api_key = load_key_from_source(api_key)?;
+
+    let parent_page_id = &ctx.config.notion.parent_page_id;
+    if parent_page_id.is_empty() {
+        return Err("Notion parent_page_id가 설정되지 않았어.".to_string());
+    }
+
+    // Build paragraph blocks from content (split by newlines).
+    let children: Vec<serde_json::Value> = content
+        .split('\n')
+        .map(|line| {
+            json!({
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [{
+                        "type": "text",
+                        "text": { "content": line }
+                    }]
+                }
+            })
+        })
+        .collect();
+
+    let body = json!({
+        "parent": {
+            "page_id": parent_page_id
+        },
+        "properties": {
+            "title": {
+                "title": [{
+                    "type": "text",
+                    "text": { "content": title }
+                }]
+            }
+        },
+        "children": children
+    });
+
+    info!(title = title, parent = %parent_page_id, "notion_create_page");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://api.notion.com/v1/pages")
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Notion-Version", "2022-06-28")
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Notion API 요청 실패: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("Notion API 에러 HTTP {status}: {err_body}"));
+    }
+
+    let resp_body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Notion 응답 파싱 실패: {e}"))?;
+
+    let url = resp_body["url"]
+        .as_str()
+        .unwrap_or("(URL 없음)");
+
+    Ok(format!("Notion 페이지 생성 완료!\n제목: {title}\nURL: {url}"))
+}
+
+// ── Agent handoff ─────────────────────────────────────────────────────────
+
+/// Returns a sentinel string that the router intercepts to switch agents.
+/// The format is: `__HANDOFF__:<agent_name>:<context>`
+fn exec_handoff(input: &serde_json::Value) -> Result<String, String> {
+    let agent = input["agent"].as_str().ok_or("missing 'agent' parameter")?;
+    let context = input["context"].as_str().unwrap_or("");
+    Ok(format!("__HANDOFF__:{}:{}", agent, context))
+}
+
+// ── Browser automation ────────────────────────────────────────────────────
+
+async fn exec_browser(
+    input: &serde_json::Value,
+    ctx: &ToolContext<'_>,
+) -> Result<String, String> {
+    if !ctx.config.browser.enabled {
+        return Err("브라우저 기능이 비활성화되어 있어. config.toml에서 [browser] enabled = true로 설정해줘.".to_string());
+    }
+
+    let action = input["action"].as_str().ok_or("missing 'action' parameter")?;
+    let url = input["url"].as_str().ok_or("missing 'url' parameter")?;
+    let _selector = input["selector"].as_str().unwrap_or("body");
+
+    let chrome_path = &ctx.config.browser.chrome_path;
+    let timeout = ctx.config.browser.timeout_secs;
+    let max_content = ctx.config.browser.max_content_bytes;
+
+    // Decide execution mode: Chrome headless or curl fallback.
+    let use_chrome = chrome_path != "curl"
+        && !chrome_path.is_empty()
+        && std::path::Path::new(chrome_path).exists();
+
+    match action {
+        "navigate" | "extract" => {
+            let html = if use_chrome {
+                let result = tokio::time::timeout(
+                    Duration::from_secs(timeout),
+                    Command::new(chrome_path)
+                        .arg("--headless=new")
+                        .arg("--disable-gpu")
+                        .arg("--no-sandbox")
+                        .arg("--dump-dom")
+                        .arg(url)
+                        .output(),
+                ).await;
+                match result {
+                    Ok(Ok(output)) => String::from_utf8_lossy(&output.stdout).to_string(),
+                    Ok(Err(e)) => return Err(format!("Chrome 실행 실패: {e}")),
+                    Err(_) => return Err(format!("타임아웃: {timeout}초 초과")),
+                }
+            } else {
+                // curl fallback.
+                let result = tokio::time::timeout(
+                    Duration::from_secs(timeout),
+                    Command::new("curl")
+                        .arg("-sL")
+                        .arg("--max-time")
+                        .arg(timeout.to_string())
+                        .arg("-A")
+                        .arg("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Sam/1.0")
+                        .arg(url)
+                        .output(),
+                ).await;
+                match result {
+                    Ok(Ok(output)) => String::from_utf8_lossy(&output.stdout).to_string(),
+                    Ok(Err(e)) => return Err(format!("curl 실행 실패: {e}")),
+                    Err(_) => return Err(format!("타임아웃: {timeout}초 초과")),
+                }
+            };
+
+            let text = strip_html_tags(&html);
+            let truncated = if text.len() > max_content {
+                let mut end = max_content;
+                while end > 0 && !text.is_char_boundary(end) { end -= 1; }
+                format!("{}...\n[{max_content}바이트로 잘림]", &text[..end])
+            } else {
+                text
+            };
+            Ok(format!("[{url}]\n\n{truncated}"))
+        }
+        "screenshot" => {
+            if !use_chrome {
+                return Err("스크린샷은 Chrome/Chromium이 필요해. config.toml [browser] chrome_path를 설정해줘.".to_string());
+            }
+            let output_path = format!("/tmp/sam_browser_{}.png", std::process::id());
+            let result = tokio::time::timeout(
+                Duration::from_secs(timeout),
+                Command::new(chrome_path)
+                    .arg("--headless=new")
+                    .arg("--disable-gpu")
+                    .arg("--no-sandbox")
+                    .arg(format!("--screenshot={output_path}"))
+                    .arg("--window-size=1280,900")
+                    .arg(url)
+                    .output(),
+            ).await;
+            match result {
+                Ok(Ok(output)) => {
+                    if output.status.success() && std::path::Path::new(&output_path).exists() {
+                        Ok(format!("스크린샷 저장됨: {output_path}"))
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        Err(format!("스크린샷 실패: {stderr}"))
+                    }
+                }
+                Ok(Err(e)) => Err(format!("Chrome 실행 실패: {e}")),
+                Err(_) => Err(format!("타임아웃: {timeout}초 초과")),
+            }
+        }
+        _ => Err(format!("unknown browser action: {action}. Use: navigate, screenshot, extract")),
+    }
+}
+
+/// Simple HTML tag stripper for text extraction.
+fn strip_html_tags(html: &str) -> String {
+    let mut result = String::with_capacity(html.len() / 2);
+    let mut in_tag = false;
+    let mut in_script = false;
+    let mut in_style = false;
+    let lower = html.to_lowercase();
+    let chars: Vec<char> = html.chars().collect();
+    let lower_chars: Vec<char> = lower.chars().collect();
+
+    let mut i = 0;
+    while i < chars.len() {
+        if !in_tag && chars[i] == '<' {
+            in_tag = true;
+            // Check for script/style start
+            let remaining: String = lower_chars[i..].iter().take(10).collect();
+            if remaining.starts_with("<script") {
+                in_script = true;
+            } else if remaining.starts_with("<style") {
+                in_style = true;
+            } else if remaining.starts_with("</script") {
+                in_script = false;
+            } else if remaining.starts_with("</style") {
+                in_style = false;
+            }
+        } else if in_tag && chars[i] == '>' {
+            in_tag = false;
+        } else if !in_tag && !in_script && !in_style {
+            result.push(chars[i]);
+        }
+        i += 1;
+    }
+
+    // Collapse whitespace.
+    let mut collapsed = String::with_capacity(result.len());
+    let mut prev_space = false;
+    for ch in result.chars() {
+        if ch.is_whitespace() {
+            if !prev_space {
+                collapsed.push(' ');
+                prev_space = true;
+            }
+        } else {
+            collapsed.push(ch);
+            prev_space = false;
+        }
+    }
+    collapsed.trim().to_string()
+}
+
+// ── Custom skill execution ────────────────────────────────────────────────
+
+async fn execute_custom_skill(
+    skill: &sam_core::CustomSkill,
+    input: &serde_json::Value,
+) -> Result<String, String> {
+    let args: Vec<String> = skill
+        .exec
+        .args
+        .iter()
+        .map(|a| interpolate_args(a, input))
+        .collect();
+
+    let mut cmd = Command::new(&skill.exec.command);
+    cmd.args(&args);
+
+    // Set optional environment variables.
+    for (k, v) in &skill.exec.env {
+        cmd.env(k, v);
+    }
+
+    let timeout = skill.exec.timeout_secs;
+
+    let result = tokio::time::timeout(Duration::from_secs(timeout), cmd.output()).await;
+
+    match result {
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let code = output.status.code().unwrap_or(-1);
+
+            let mut result = format!("[exit code: {code}]\n");
+            if !stdout.is_empty() {
+                result.push_str(&truncate_output(&stdout, MAX_OUTPUT_BYTES));
+            }
+            if !stderr.is_empty() {
+                result.push_str("\n[stderr]\n");
+                result.push_str(&truncate_output(&stderr, MAX_OUTPUT_BYTES / 2));
+            }
+            Ok(result)
+        }
+        Ok(Err(e)) => Err(format!("skill command execution failed: {e}")),
+        Err(_) => Err(format!("skill timeout: {timeout}s exceeded")),
+    }
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 fn truncate_output(s: &str, max_bytes: usize) -> String {
@@ -934,7 +1440,7 @@ mod tests {
     #[test]
     fn builtin_definitions_are_valid() {
         let defs = builtin_tool_definitions();
-        assert_eq!(defs.len(), 12);
+        assert_eq!(defs.len(), 17);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"memory_recall"));
         assert!(names.contains(&"run_command"));
@@ -956,7 +1462,7 @@ mod tests {
     fn unknown_tool_is_rejected() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let config = SamConfig::default();
-        let mut ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new() };
+        let mut ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new(), flow_store: None, llm_client: None, mcp_clients: None, skill_store: None };
         let input = json!({});
         let result = rt.block_on(execute_builtin("nonexistent", &input, &mut ctx));
         assert!(result.is_err());
@@ -965,7 +1471,7 @@ mod tests {
     #[test]
     fn memory_recall_without_adapter_returns_error() {
         let config = SamConfig::default();
-        let mut ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new() };
+        let mut ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new(), flow_store: None, llm_client: None, mcp_clients: None, skill_store: None };
         let input = json!({"query": "test"});
         let result = exec_memory_recall(&input, &mut ctx);
         assert!(result.is_err());
@@ -975,7 +1481,7 @@ mod tests {
     #[test]
     fn memory_store_without_adapter_returns_error() {
         let config = SamConfig::default();
-        let mut ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new() };
+        let mut ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new(), flow_store: None, llm_client: None, mcp_clients: None, skill_store: None };
         let input = json!({"text": "remember this"});
         let result = exec_memory_store(&input, &mut ctx);
         assert!(result.is_err());
@@ -1018,7 +1524,7 @@ mod tests {
     fn run_command_works() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let config = SamConfig::default();
-        let ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new() };
+        let ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new(), flow_store: None, llm_client: None, mcp_clients: None, skill_store: None };
         let input = json!({"command": "echo hello", "working_dir": "/tmp"});
         let result = rt.block_on(exec_run_command(&input, &ctx));
         assert!(result.is_ok());
@@ -1030,7 +1536,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut config = SamConfig::default();
         config.safety.destructive_patterns = vec!["rm -rf".to_string()];
-        let ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new() };
+        let ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new(), flow_store: None, llm_client: None, mcp_clients: None, skill_store: None };
         let input = json!({"command": "rm -rf /"});
         let result = rt.block_on(exec_run_command(&input, &ctx));
         assert!(result.is_err());

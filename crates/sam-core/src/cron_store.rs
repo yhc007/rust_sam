@@ -161,7 +161,7 @@ impl CronStore {
 /// Fields: minute hour day-of-month month day-of-week
 /// Supports: `*`, specific numbers, comma-separated lists, ranges (e.g. 1-5),
 /// and step values (e.g. */5).
-fn cron_matches(expr: &str, now_unix: i64) -> bool {
+pub fn cron_matches(expr: &str, now_unix: i64) -> bool {
     let local = match Local.timestamp_opt(now_unix, 0) {
         chrono::LocalResult::Single(t) => t,
         _ => return false,

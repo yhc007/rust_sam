@@ -124,6 +124,7 @@ impl SamClaudeClient {
                                 });
                             }
                             ContentBlock::ToolResult { .. } => {}
+                            ContentBlock::Image { .. } => {}
                         }
                     }
 

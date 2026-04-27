@@ -200,6 +200,7 @@ fn to_oai_messages(system: &str, messages: &[ChatMessage]) -> Vec<OaiMessage> {
                                 });
                             }
                             ContentBlock::ToolResult { .. } => {}
+                            ContentBlock::Image { .. } => {}
                         }
                     }
 

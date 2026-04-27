@@ -146,8 +146,12 @@ async fn chat_handler(
             client.as_ref(),
             budget,
             &req.message,
+            &[],
             memory.as_mut(),
             config,
+            None,
+            None,
+            None,
             None,
         )
         .await

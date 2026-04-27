@@ -5,6 +5,7 @@
 //! via [`crate::paths::expand_tilde`] when accessed.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::SamError;
@@ -32,6 +33,16 @@ pub struct SamConfig {
     pub web_search: WebSearchConfig,
     #[serde(default)]
     pub safety: SafetyConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
+    #[serde(default)]
+    pub whisper: WhisperConfig,
+    #[serde(default)]
+    pub heartbeat: HeartbeatConfig,
+    #[serde(default)]
+    pub agents: AgentConfig,
+    #[serde(default)]
+    pub browser: BrowserConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -338,6 +349,149 @@ impl Default for SafetyConfig {
         Self {
             confirmation_ttl_secs: Self::default_ttl(),
             destructive_patterns: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct McpConfig {
+    #[serde(default)]
+    pub servers: Vec<McpServerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WhisperConfig {
+    /// Enable voice memo transcription.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Whisper API URL. Default: http://localhost:8080/v1/audio/transcriptions
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Model name (default: "whisper-1").
+    #[serde(default)]
+    pub model: Option<String>,
+    /// API key source (env: or file:). Optional for local servers.
+    #[serde(default)]
+    pub api_key_source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeartbeatConfig {
+    /// Enable proactive autonomous mode.
+    #[serde(default = "HeartbeatConfig::default_enabled")]
+    pub enabled: bool,
+    /// Morning brief hour (0-23). Default: 8.
+    #[serde(default = "HeartbeatConfig::default_morning_hour")]
+    pub morning_hour: u32,
+    /// Evening summary hour (0-23). Default: 21.
+    #[serde(default = "HeartbeatConfig::default_evening_hour")]
+    pub evening_hour: u32,
+    /// Check interval in seconds. Default: 1800 (30 min).
+    #[serde(default = "HeartbeatConfig::default_interval_secs")]
+    pub interval_secs: u64,
+    /// Minutes before a reminder to send a nudge. Default: 30.
+    #[serde(default = "HeartbeatConfig::default_nudge_before_mins")]
+    pub nudge_before_mins: i64,
+    /// Waking hours start. Default: 8.
+    #[serde(default = "HeartbeatConfig::default_wake_hour")]
+    pub wake_hour: u32,
+    /// Waking hours end. Default: 22.
+    #[serde(default = "HeartbeatConfig::default_sleep_hour")]
+    pub sleep_hour: u32,
+}
+
+impl HeartbeatConfig {
+    fn default_enabled() -> bool { true }
+    fn default_morning_hour() -> u32 { 8 }
+    fn default_evening_hour() -> u32 { 21 }
+    fn default_interval_secs() -> u64 { 1800 }
+    fn default_nudge_before_mins() -> i64 { 30 }
+    fn default_wake_hour() -> u32 { 8 }
+    fn default_sleep_hour() -> u32 { 22 }
+}
+
+impl Default for HeartbeatConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            morning_hour: Self::default_morning_hour(),
+            evening_hour: Self::default_evening_hour(),
+            interval_secs: Self::default_interval_secs(),
+            nudge_before_mins: Self::default_nudge_before_mins(),
+            wake_hour: Self::default_wake_hour(),
+            sleep_hour: Self::default_sleep_hour(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentConfig {
+    /// Enable multi-agent routing.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Default agent name when no routing match.
+    #[serde(default = "AgentConfig::default_agent")]
+    pub default_agent: String,
+    /// Use LLM-based classification (expensive) vs keyword-only.
+    #[serde(default)]
+    pub llm_classify: bool,
+}
+
+impl AgentConfig {
+    fn default_agent() -> String { "default".to_string() }
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_agent: Self::default_agent(),
+            llm_classify: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserConfig {
+    /// Enable browser automation tool.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Path to Chrome/Chromium binary.
+    #[serde(default = "BrowserConfig::default_chrome")]
+    pub chrome_path: String,
+    /// Page load timeout in seconds.
+    #[serde(default = "BrowserConfig::default_timeout")]
+    pub timeout_secs: u64,
+    /// Max content bytes to return from get_content.
+    #[serde(default = "BrowserConfig::default_max_content")]
+    pub max_content_bytes: usize,
+}
+
+impl BrowserConfig {
+    fn default_chrome() -> String {
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".to_string()
+    }
+    fn default_timeout() -> u64 { 30 }
+    fn default_max_content() -> usize { 16_000 }
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            chrome_path: Self::default_chrome(),
+            timeout_secs: Self::default_timeout(),
+            max_content_bytes: Self::default_max_content(),
         }
     }
 }

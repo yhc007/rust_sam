@@ -7,7 +7,31 @@ use rusqlite::{Connection, OpenFlags};
 use tracing::warn;
 
 use crate::probe::default_chat_db_path;
-use crate::types::IncomingMessage;
+use crate::types::{Attachment, IncomingMessage};
+
+/// Image MIME types we support forwarding to Claude Vision.
+const IMAGE_MIME_TYPES: &[&str] = &[
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/heic",
+    "image/webp",
+];
+
+/// Audio MIME types we support for Whisper transcription.
+const AUDIO_MIME_TYPES: &[&str] = &[
+    "audio/mp4",
+    "audio/x-m4a",
+    "audio/x-caf",
+    "audio/mpeg",
+    "audio/wav",
+    "audio/x-wav",
+    "audio/ogg",
+    "audio/webm",
+    "audio/aac",
+    "audio/flac",
+    "audio/amr",
+];
 
 /// A handle to the macOS Messages chat.db, opened read-only.
 ///
@@ -42,6 +66,9 @@ impl ChatDbReader {
 
     /// Poll for new incoming messages with ROWID greater than `last_seen_rowid`,
     /// filtered to the given allowed handles. Returns messages in ROWID order.
+    ///
+    /// Messages with text OR image attachments are returned. If a message has
+    /// attachments but no text, the text field is set to an empty string.
     pub fn poll_new(&self, last_seen_rowid: i64, allowed: &[String]) -> Result<Vec<IncomingMessage>> {
         if allowed.is_empty() {
             return Ok(vec![]);
@@ -60,7 +87,7 @@ impl ChatDbReader {
              JOIN handle h ON m.handle_id = h.ROWID \
              WHERE m.ROWID > ?1 \
                AND m.is_from_me = 0 \
-               AND m.text IS NOT NULL \
+               AND (m.text IS NOT NULL OR EXISTS (SELECT 1 FROM message_attachment_join maj WHERE maj.message_id = m.ROWID)) \
                AND h.id IN ({placeholders}) \
              ORDER BY m.ROWID ASC"
         );
@@ -75,26 +102,85 @@ impl ChatDbReader {
 
         let rows = stmt.query_map(&*param_refs, |row| {
             let rowid: i64 = row.get(0)?;
-            let text: String = row.get(1)?;
+            let text: Option<String> = row.get(1)?;
             let sender: String = row.get(2)?;
             let raw_apple_ts: i64 = row.get(3)?;
-            Ok(IncomingMessage {
-                rowid,
-                text,
-                sender,
-                timestamp_unix: apple_to_unix(raw_apple_ts),
-                raw_apple_ts,
-            })
+            Ok((rowid, text.unwrap_or_default(), sender, raw_apple_ts))
         })?;
 
         let mut messages = Vec::new();
         for row in rows {
             match row {
-                Ok(msg) => messages.push(msg),
+                Ok((rowid, text, sender, raw_apple_ts)) => {
+                    let attachments = self.fetch_attachments(rowid);
+                    messages.push(IncomingMessage {
+                        rowid,
+                        text,
+                        sender,
+                        timestamp_unix: apple_to_unix(raw_apple_ts),
+                        raw_apple_ts,
+                        attachments,
+                    });
+                }
                 Err(e) => warn!("skipping malformed row: {e}"),
             }
         }
         Ok(messages)
+    }
+
+    /// Fetch image and audio attachments for a given message ROWID.
+    ///
+    /// Returns attachments with supported image or audio MIME types.
+    /// The `filename` column uses `~` prefix which is expanded to the home dir.
+    fn fetch_attachments(&self, message_rowid: i64) -> Vec<Attachment> {
+        let sql = "SELECT a.filename, a.mime_type, a.transfer_name \
+                   FROM attachment a \
+                   JOIN message_attachment_join maj ON a.ROWID = maj.attachment_id \
+                   WHERE maj.message_id = ?1";
+
+        let mut stmt = match self.conn.prepare(sql) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(message_rowid, "failed to prepare attachment query: {e}");
+                return vec![];
+            }
+        };
+
+        let rows = match stmt.query_map([message_rowid], |row| {
+            let filename: Option<String> = row.get(0)?;
+            let mime_type: Option<String> = row.get(1)?;
+            let transfer_name: Option<String> = row.get(2)?;
+            Ok((filename, mime_type, transfer_name))
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(message_rowid, "failed to query attachments: {e}");
+                return vec![];
+            }
+        };
+
+        let mut attachments = Vec::new();
+        for row in rows {
+            match row {
+                Ok((Some(filename), Some(mime_type), transfer_name)) => {
+                    // Only include supported image and audio types.
+                    if !IMAGE_MIME_TYPES.contains(&mime_type.as_str())
+                        && !AUDIO_MIME_TYPES.contains(&mime_type.as_str())
+                    {
+                        continue;
+                    }
+                    let expanded_path = expand_tilde(&filename);
+                    attachments.push(Attachment {
+                        path: expanded_path,
+                        mime_type,
+                        filename: transfer_name.unwrap_or_else(|| filename.clone()),
+                    });
+                }
+                Ok(_) => {} // skip rows with NULL filename or mime_type
+                Err(e) => warn!(message_rowid, "skipping malformed attachment row: {e}"),
+            }
+        }
+        attachments
     }
 
     /// Count messages from any of the given handles within the last
@@ -134,6 +220,16 @@ impl ChatDbReader {
         let count: i64 = stmt.query_row(rusqlite::params_from_iter(params.iter()), |row| row.get(0))?;
         Ok(count.max(0) as usize)
     }
+}
+
+/// Expand a leading `~` in a path to the user's home directory.
+fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix('~') {
+        if let Some(home) = dirs::home_dir() {
+            return format!("{}{rest}", home.display());
+        }
+    }
+    path.to_string()
 }
 
 /// Convert Apple's nanosecond timestamp (since 2001-01-01 00:00 UTC) to
@@ -180,5 +276,18 @@ mod tests {
         // If we had a reader, poll_new with empty allowed should return empty.
         let empty: Vec<String> = vec![];
         assert!(empty.is_empty()); // placeholder — real test needs a DB fixture
+    }
+
+    #[test]
+    fn expand_tilde_works() {
+        let expanded = expand_tilde("~/Library/Messages/Attachments/foo.jpg");
+        assert!(!expanded.starts_with('~'));
+        assert!(expanded.ends_with("/Library/Messages/Attachments/foo.jpg"));
+    }
+
+    #[test]
+    fn expand_tilde_no_tilde() {
+        let path = "/absolute/path/file.png";
+        assert_eq!(expand_tilde(path), path);
     }
 }

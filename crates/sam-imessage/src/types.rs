@@ -2,6 +2,17 @@
 
 use serde::{Deserialize, Serialize};
 
+/// An image/file attachment received from iMessage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Attachment {
+    /// Expanded filesystem path to the attachment file.
+    pub path: String,
+    /// MIME type, e.g. "image/jpeg".
+    pub mime_type: String,
+    /// Original filename (transfer_name from chat.db).
+    pub filename: String,
+}
+
 /// A message received from chat.db.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IncomingMessage {
@@ -13,6 +24,8 @@ pub struct IncomingMessage {
     pub timestamp_unix: i64,
     /// Raw Apple Absolute Time (nanoseconds since 2001-01-01).
     pub raw_apple_ts: i64,
+    /// Image attachments associated with this message.
+    pub attachments: Vec<Attachment>,
 }
 
 /// A message to be sent via osascript.
