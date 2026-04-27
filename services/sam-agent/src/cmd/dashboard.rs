@@ -1,7 +1,7 @@
-//! `sam dashboard` — Health monitoring web UI.
+//! `sam dashboard` — Full-featured web management UI.
 //!
-//! Provides a lightweight HTTP dashboard showing token usage, session status,
-//! active reminders, flows, and system health.
+//! Provides HTTP dashboard with real-time stats, session management,
+//! plugin marketplace, agent routing, and system health monitoring.
 
 use axum::{
     response::Html,
@@ -13,7 +13,13 @@ use tower_http::cors::CorsLayer;
 use tracing::info;
 
 use sam_claude::TokenBudget;
-use sam_core::{config_path, load_config, CronStore, FlowStore};
+use sam_core::{
+    config_path, load_config, AgentStore, CronStore, FlowStore, PluginStore, Registry, SkillStore,
+};
+
+use chrono::TimeZone;
+
+// ── API Types ──────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
 struct HealthStatus {
@@ -38,6 +44,7 @@ struct ReminderInfo {
     message: String,
     schedule: String,
     repeat: bool,
+    handle: String,
 }
 
 #[derive(Serialize)]
@@ -63,19 +70,64 @@ struct RuntimeStats {
 }
 
 #[derive(Serialize)]
+struct AgentInfo {
+    name: String,
+    description: String,
+    triggers: Vec<String>,
+    priority: i32,
+    can_handoff_to: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct PluginInfo {
+    name: String,
+    version: String,
+    description: String,
+    author: String,
+    enabled: bool,
+    tools_count: usize,
+    agents_count: usize,
+    source: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SkillInfo {
+    name: String,
+    description: String,
+}
+
+#[derive(Serialize)]
+struct SessionInfo {
+    handle: String,
+    message_count: usize,
+    last_modified: String,
+}
+
+#[derive(Serialize)]
 struct DashboardData {
     health: HealthStatus,
     budget: BudgetStatus,
     reminders: Vec<ReminderInfo>,
     flows: Vec<FlowInfo>,
     runtime: RuntimeStats,
+    agents: Vec<AgentInfo>,
+    plugins: Vec<PluginInfo>,
+    skills: Vec<SkillInfo>,
+    sessions: Vec<SessionInfo>,
 }
+
+// ── Routes ────────────────────────────────────────────────────────────
 
 pub async fn run(port: u16) -> i32 {
     let app = Router::new()
         .route("/", get(dashboard_html))
         .route("/api/health", get(api_health))
         .route("/api/dashboard", get(api_dashboard))
+        .route("/api/agents", get(api_agents))
+        .route("/api/plugins", get(api_plugins))
+        .route("/api/skills", get(api_skills))
+        .route("/api/sessions", get(api_sessions))
+        .route("/api/registry", get(api_registry))
         .layer(CorsLayer::permissive());
 
     let addr = format!("0.0.0.0:{port}");
@@ -97,6 +149,8 @@ pub async fn run(port: u16) -> i32 {
     }
     0
 }
+
+// ── API Handlers ──────────────────────────────────────────────────────
 
 async fn api_health() -> Json<HealthStatus> {
     let config = load_config(config_path()).unwrap_or_default();
@@ -131,6 +185,7 @@ async fn api_dashboard() -> Json<DashboardData> {
         .map(|j| ReminderInfo {
             id: j.id.clone(),
             message: j.message.clone(),
+            handle: j.handle.clone(),
             schedule: match &j.schedule {
                 sam_core::CronSchedule::Cron { expr } => format!("cron: {expr}"),
                 sam_core::CronSchedule::Once { at_unix } => {
@@ -162,14 +217,18 @@ async fn api_dashboard() -> Json<DashboardData> {
         .collect();
 
     let runtime = load_runtime_stats();
+    let agents = load_agents();
+    let plugins = load_plugins();
+    let skills = load_skills();
+    let sessions = load_sessions();
 
     Json(DashboardData {
         health: HealthStatus {
             status: if runtime.uptime_secs > 0 { "ok" } else { "unknown" },
             uptime_secs: runtime.uptime_secs,
             version: env!("CARGO_PKG_VERSION"),
-            provider: config.llm.provider,
-            model: config.llm.model,
+            provider: config.llm.provider.clone(),
+            model: config.llm.model.clone(),
         },
         budget: BudgetStatus {
             daily_limit: config.llm.daily_token_budget,
@@ -180,14 +239,42 @@ async fn api_dashboard() -> Json<DashboardData> {
         reminders,
         flows,
         runtime,
+        agents,
+        plugins,
+        skills,
+        sessions,
     })
+}
+
+async fn api_agents() -> Json<Vec<AgentInfo>> {
+    Json(load_agents())
+}
+
+async fn api_plugins() -> Json<Vec<PluginInfo>> {
+    Json(load_plugins())
+}
+
+async fn api_skills() -> Json<Vec<SkillInfo>> {
+    Json(load_skills())
+}
+
+async fn api_sessions() -> Json<Vec<SessionInfo>> {
+    Json(load_sessions())
+}
+
+async fn api_registry() -> Json<serde_json::Value> {
+    match Registry::load_cache() {
+        Some(reg) => Json(serde_json::to_value(reg).unwrap_or_default()),
+        None => Json(serde_json::json!({"error": "no registry cache"})),
+    }
 }
 
 async fn dashboard_html() -> Html<&'static str> {
     Html(include_str!("dashboard.html"))
 }
 
-/// Load daemon runtime stats from the shared JSON file.
+// ── Data Loaders ──────────────────────────────────────────────────────
+
 fn load_runtime_stats() -> RuntimeStats {
     let path = sam_core::state_dir().join("daemon_stats.json");
     std::fs::read_to_string(path)
@@ -196,4 +283,111 @@ fn load_runtime_stats() -> RuntimeStats {
         .unwrap_or_default()
 }
 
-use chrono::TimeZone;
+fn load_agents() -> Vec<AgentInfo> {
+    let store = AgentStore::load();
+    store
+        .list()
+        .into_iter()
+        .map(|a| AgentInfo {
+            name: a.name.clone(),
+            description: a.description.clone(),
+            triggers: a.triggers.clone(),
+            priority: a.priority,
+            can_handoff_to: a.can_handoff_to.clone(),
+        })
+        .collect()
+}
+
+fn load_plugins() -> Vec<PluginInfo> {
+    let store = PluginStore::load();
+    store
+        .list()
+        .into_iter()
+        .map(|p| {
+            let source = p
+                .path
+                .join(".sam_source.json")
+                .exists()
+                .then(|| {
+                    std::fs::read_to_string(p.path.join(".sam_source.json"))
+                        .ok()
+                        .and_then(|d| serde_json::from_str::<serde_json::Value>(&d).ok())
+                        .and_then(|v| v["repo"].as_str().map(String::from))
+                })
+                .flatten();
+            PluginInfo {
+                name: p.manifest.name.clone(),
+                version: p.manifest.version.clone(),
+                description: p.manifest.description.clone(),
+                author: p.manifest.author.clone(),
+                enabled: p.manifest.enabled,
+                tools_count: p.tools.len(),
+                agents_count: p.agents.len(),
+                source,
+            }
+        })
+        .collect()
+}
+
+fn load_skills() -> Vec<SkillInfo> {
+    let store = SkillStore::load();
+    store
+        .list()
+        .iter()
+        .map(|s| SkillInfo {
+            name: s.name.clone(),
+            description: s.description.clone(),
+        })
+        .collect()
+}
+
+fn load_sessions() -> Vec<SessionInfo> {
+    let sessions_dir = sam_core::state_dir().join("sessions");
+    let mut sessions = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let handle = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            let (msg_count, last_mod) = match std::fs::read_to_string(&path) {
+                Ok(data) => {
+                    let count = data.matches("\"role\"").count() / 2; // rough estimate
+                    let modified = std::fs::metadata(&path)
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .map(|t| {
+                            let secs = t
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs() as i64;
+                            chrono::Local
+                                .timestamp_opt(secs, 0)
+                                .single()
+                                .map(|dt| dt.format("%m-%d %H:%M").to_string())
+                                .unwrap_or_default()
+                        })
+                        .unwrap_or_default();
+                    (count, modified)
+                }
+                Err(_) => (0, String::new()),
+            };
+
+            sessions.push(SessionInfo {
+                handle,
+                message_count: msg_count,
+                last_modified: last_mod,
+            });
+        }
+    }
+
+    sessions.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+    sessions
+}

@@ -6,8 +6,18 @@
 <title>Sam Dashboard</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a0a; color: #e0e0e0; padding: 2rem; }
-h1 { font-size: 1.5rem; margin-bottom: 1.5rem; color: #fff; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a0a; color: #e0e0e0; padding: 1.5rem; }
+h1 { font-size: 1.5rem; margin-bottom: 1rem; color: #fff; }
+
+/* Tabs */
+.tabs { display: flex; gap: 0; border-bottom: 1px solid #333; margin-bottom: 1.5rem; overflow-x: auto; }
+.tab { padding: 0.6rem 1.2rem; font-size: 0.85rem; color: #888; cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; transition: all 0.2s; }
+.tab:hover { color: #ccc; }
+.tab.active { color: #4ade80; border-bottom-color: #4ade80; }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+/* Grid & Cards */
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem; }
 .card { background: #1a1a1a; border: 1px solid #333; border-radius: 12px; padding: 1.5rem; }
 .card h2 { font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.05em; color: #888; margin-bottom: 1rem; }
@@ -21,46 +31,125 @@ h1 { font-size: 1.5rem; margin-bottom: 1.5rem; color: #fff; }
 .bar-fill { height: 100%; background: #4ade80; border-radius: 4px; transition: width 0.5s; }
 .bar-fill.warn { background: #fbbf24; }
 .bar-fill.danger { background: #ef4444; }
+
+/* Lists */
 .list { list-style: none; }
 .list li { padding: 0.5rem 0; border-bottom: 1px solid #222; font-size: 0.9rem; }
 .list li:last-child { border-bottom: none; }
+
+/* Table */
+.table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.table th { text-align: left; padding: 0.5rem; color: #888; border-bottom: 1px solid #333; font-weight: 500; }
+.table td { padding: 0.5rem; border-bottom: 1px solid #222; }
+.table tr:last-child td { border-bottom: none; }
+
+/* Badges */
 .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; background: #333; margin-left: 0.5rem; }
 .badge.cron { background: #1e3a5f; color: #60a5fa; }
 .badge.manual { background: #3b2f1a; color: #fbbf24; }
 .badge.on { background: #1a3d1a; color: #4ade80; }
 .badge.off { background: #2d1515; color: #888; }
+.badge.pri { background: #2d1a3d; color: #c084fc; }
+.badge.source { background: #1a2d3d; color: #7dd3fc; }
 .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #4ade80; margin-right: 0.5rem; }
 .status-dot.error { background: #ef4444; }
 .status-dot.unknown { background: #888; }
 #error { display: none; background: #2d1515; border: 1px solid #ef4444; padding: 1rem; border-radius: 8px; margin-bottom: 1rem; color: #fca5a5; }
+.empty { color: #666; font-style: italic; padding: 1rem 0; }
+.tag { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.7rem; background: #262626; color: #aaa; margin: 0.1rem; }
 </style>
 </head>
 <body>
 <h1><span class="status-dot" id="status-dot"></span>Sam Dashboard</h1>
 <div id="error"></div>
-<div class="grid">
-  <div class="card">
-    <h2>Runtime</h2>
-    <div id="runtime-info">Loading...</div>
+
+<div class="tabs">
+  <div class="tab active" data-tab="overview">Overview</div>
+  <div class="tab" data-tab="agents">Agents</div>
+  <div class="tab" data-tab="plugins">Plugins</div>
+  <div class="tab" data-tab="skills">Skills</div>
+  <div class="tab" data-tab="sessions">Sessions</div>
+  <div class="tab" data-tab="reminders">Reminders</div>
+  <div class="tab" data-tab="flows">Flows</div>
+</div>
+
+<!-- Overview Tab -->
+<div class="tab-panel active" id="panel-overview">
+  <div class="grid">
+    <div class="card">
+      <h2>Runtime</h2>
+      <div id="runtime-info">Loading...</div>
+    </div>
+    <div class="card">
+      <h2>Token Budget</h2>
+      <div id="budget-info">Loading...</div>
+    </div>
+    <div class="card">
+      <h2>System</h2>
+      <div id="system-info">Loading...</div>
+    </div>
   </div>
+</div>
+
+<!-- Agents Tab -->
+<div class="tab-panel" id="panel-agents">
   <div class="card">
-    <h2>Token Budget</h2>
-    <div id="budget-info">Loading...</div>
+    <h2>Registered Agents</h2>
+    <div id="agents-content">Loading...</div>
   </div>
+</div>
+
+<!-- Plugins Tab -->
+<div class="tab-panel" id="panel-plugins">
   <div class="card">
-    <h2>System</h2>
-    <div id="system-info">Loading...</div>
+    <h2>Installed Plugins</h2>
+    <div id="plugins-content">Loading...</div>
   </div>
+</div>
+
+<!-- Skills Tab -->
+<div class="tab-panel" id="panel-skills">
   <div class="card">
-    <h2>Reminders</h2>
+    <h2>Custom Skills</h2>
+    <div id="skills-content">Loading...</div>
+  </div>
+</div>
+
+<!-- Sessions Tab -->
+<div class="tab-panel" id="panel-sessions">
+  <div class="card">
+    <h2>Active Sessions</h2>
+    <div id="sessions-content">Loading...</div>
+  </div>
+</div>
+
+<!-- Reminders Tab -->
+<div class="tab-panel" id="panel-reminders">
+  <div class="card">
+    <h2>Scheduled Reminders</h2>
     <ul class="list" id="reminders-list"><li>Loading...</li></ul>
   </div>
+</div>
+
+<!-- Flows Tab -->
+<div class="tab-panel" id="panel-flows">
   <div class="card">
-    <h2>Flows</h2>
+    <h2>Automation Flows</h2>
     <ul class="list" id="flows-list"><li>Loading...</li></ul>
   </div>
 </div>
+
 <script>
+// Tab switching
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
+  });
+});
+
 function formatUptime(secs) {
   if (secs < 60) return `${secs}s`;
   if (secs < 3600) return `${Math.floor(secs/60)}m ${secs%60}s`;
@@ -98,8 +187,9 @@ async function refresh() {
         <div class="stat-item"><div class="num">${r.errors_total}</div><div class="label">errors</div></div>
       </div>
       <div style="font-size:0.85rem;color:#888;margin-top:0.5rem">
-        Last message: ${timeAgo(r.last_message_at)}<br>
-        Heartbeats: ${r.heartbeat_sent} |
+        Sessions: ${r.active_sessions} |
+        Last msg: ${timeAgo(r.last_message_at)} |
+        Heartbeats: ${r.heartbeat_sent}<br>
         MCP: ${r.mcp_servers} server${r.mcp_servers !== 1 ? 's' : ''} |
         Whisper: <span class="badge ${r.whisper_enabled ? 'on' : 'off'}">${r.whisper_enabled ? 'ON' : 'OFF'}</span>
       </div>
@@ -110,6 +200,9 @@ async function refresh() {
       <div><strong>Provider:</strong> ${data.health.provider}</div>
       <div><strong>Model:</strong> ${data.health.model}</div>
       <div><strong>Version:</strong> ${data.health.version}</div>
+      <div style="margin-top:0.5rem;font-size:0.85rem;color:#888">
+        Status: <span class="badge on">${data.health.status}</span>
+      </div>
     `;
 
     // Budget
@@ -119,25 +212,79 @@ async function refresh() {
       <div class="stat">${(b.remaining / 1000).toFixed(0)}K</div>
       <div class="stat-label">tokens remaining</div>
       <div class="bar"><div class="bar-fill ${barClass}" style="width:${b.percentage_used}%"></div></div>
-      <div style="margin-top:0.5rem;font-size:0.85rem;color:#888">${(b.used_today/1000).toFixed(0)}K used / ${(b.daily_limit/1000).toFixed(0)}K limit</div>
+      <div style="margin-top:0.5rem;font-size:0.85rem;color:#888">${(b.used_today/1000).toFixed(0)}K used / ${(b.daily_limit/1000).toFixed(0)}K limit (${b.percentage_used.toFixed(1)}%)</div>
     `;
+
+    // Agents
+    if (data.agents.length === 0) {
+      document.getElementById('agents-content').innerHTML = '<div class="empty">No agents registered</div>';
+    } else {
+      let html = '<table class="table"><tr><th>Name</th><th>Description</th><th>Priority</th><th>Triggers</th><th>Handoff</th></tr>';
+      data.agents.forEach(a => {
+        const triggers = a.triggers.map(t => `<span class="tag">${t}</span>`).join(' ');
+        const handoff = a.can_handoff_to.map(h => `<span class="tag">${h}</span>`).join(' ') || '-';
+        html += `<tr><td><strong>${a.name}</strong></td><td>${a.description}</td><td><span class="badge pri">P${a.priority}</span></td><td>${triggers}</td><td>${handoff}</td></tr>`;
+      });
+      html += '</table>';
+      document.getElementById('agents-content').innerHTML = html;
+    }
+
+    // Plugins
+    if (data.plugins.length === 0) {
+      document.getElementById('plugins-content').innerHTML = '<div class="empty">No plugins installed</div>';
+    } else {
+      let html = '<table class="table"><tr><th>Name</th><th>Version</th><th>Author</th><th>Tools</th><th>Agents</th><th>Status</th><th>Source</th></tr>';
+      data.plugins.forEach(p => {
+        const status = p.enabled ? '<span class="badge on">enabled</span>' : '<span class="badge off">disabled</span>';
+        const source = p.source ? `<span class="badge source">${p.source}</span>` : '-';
+        html += `<tr><td><strong>${p.name}</strong><br><span style="font-size:0.8rem;color:#888">${p.description}</span></td><td>${p.version}</td><td>${p.author}</td><td>${p.tools_count}</td><td>${p.agents_count}</td><td>${status}</td><td>${source}</td></tr>`;
+      });
+      html += '</table>';
+      document.getElementById('plugins-content').innerHTML = html;
+    }
+
+    // Skills
+    if (data.skills.length === 0) {
+      document.getElementById('skills-content').innerHTML = '<div class="empty">No custom skills defined</div>';
+    } else {
+      let html = '<table class="table"><tr><th>Name</th><th>Description</th></tr>';
+      data.skills.forEach(s => {
+        html += `<tr><td><strong>${s.name}</strong></td><td>${s.description}</td></tr>`;
+      });
+      html += '</table>';
+      document.getElementById('skills-content').innerHTML = html;
+    }
+
+    // Sessions
+    if (data.sessions.length === 0) {
+      document.getElementById('sessions-content').innerHTML = '<div class="empty">No active sessions</div>';
+    } else {
+      let html = '<table class="table"><tr><th>Handle</th><th>Messages</th><th>Last Modified</th></tr>';
+      data.sessions.forEach(s => {
+        html += `<tr><td><strong>${s.handle}</strong></td><td>${s.message_count}</td><td>${s.last_modified}</td></tr>`;
+      });
+      html += '</table>';
+      document.getElementById('sessions-content').innerHTML = html;
+    }
 
     // Reminders
     const rl = document.getElementById('reminders-list');
     if (data.reminders.length === 0) {
-      rl.innerHTML = '<li style="color:#666">No active reminders</li>';
+      rl.innerHTML = '<li class="empty">No active reminders</li>';
     } else {
-      rl.innerHTML = data.reminders.map(r => `<li>${r.message} <span class="badge cron">${r.schedule}</span></li>`).join('');
+      rl.innerHTML = data.reminders.map(r =>
+        `<li><strong>${r.message}</strong> <span class="badge cron">${r.schedule}</span>${r.repeat ? ' <span class="badge on">repeat</span>' : ''}<br><span style="font-size:0.8rem;color:#666">handle: ${r.handle} | id: ${r.id}</span></li>`
+      ).join('');
     }
 
     // Flows
     const fl = document.getElementById('flows-list');
     if (data.flows.length === 0) {
-      fl.innerHTML = '<li style="color:#666">No flows configured</li>';
+      fl.innerHTML = '<li class="empty">No flows configured</li>';
     } else {
       fl.innerHTML = data.flows.map(f => {
         const badge = f.trigger === 'manual' ? 'manual' : 'cron';
-        return `<li>${f.name} — ${f.description} <span class="badge ${badge}">${f.trigger}</span> (${f.steps} steps)</li>`;
+        return `<li><strong>${f.name}</strong> — ${f.description} <span class="badge ${badge}">${f.trigger}</span> <span class="badge">${f.steps} steps</span></li>`;
       }).join('');
     }
   } catch (e) {
