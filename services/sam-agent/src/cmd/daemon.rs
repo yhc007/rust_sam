@@ -119,6 +119,29 @@ pub async fn run() -> i32 {
             }
         },
     };
+
+    // Build optional fallback LLM client.
+    let fallback_client: Option<Arc<dyn LlmBackend>> = config.llm.fallback_config().and_then(|fb_cfg| {
+        let fb_key = match load_api_key(&fb_cfg) {
+            Ok(k) => k,
+            Err(e) => {
+                warn!("Fallback API key error, disabling fallback: {e}");
+                return None;
+            }
+        };
+        let built: Option<Arc<dyn LlmBackend>> = match fb_cfg.provider.as_str() {
+            "xai" => XaiClient::new(fb_key, &fb_cfg).ok().map(|c| Arc::new(c) as Arc<dyn LlmBackend>),
+            "openai-compatible" => OpenAiCompatibleClient::new(fb_key, &fb_cfg).ok().map(|c| Arc::new(c) as Arc<dyn LlmBackend>),
+            _ => SamClaudeClient::new(fb_key, &fb_cfg).ok().map(|c| Arc::new(c) as Arc<dyn LlmBackend>),
+        };
+        if built.is_some() {
+            info!(provider = %fb_cfg.provider, model = %fb_cfg.model, "Fallback LLM client ready");
+        } else {
+            warn!("Failed to build fallback LLM client");
+        }
+        built
+    });
+
     let system_prompt = load_system_prompt();
     let max_history = config.llm.max_history;
     let mut budget = TokenBudget::load_or_new(config.llm.daily_token_budget);
@@ -331,6 +354,7 @@ pub async fn run() -> i32 {
     // sessions and budget without Arc<Mutex>.
     let router_cancel = cancel.clone();
     let router_client = Arc::clone(&client);
+    let router_fallback = fallback_client.clone();
     let router_config = config.clone();
     let router_dq = Arc::clone(&delivery_queue);
     let router_flow_store = Arc::clone(&flow_store);
@@ -755,21 +779,66 @@ pub async fn run() -> i32 {
                                 text
                             }
                             Err(e) => {
-                                let count = consecutive_errors
-                                    .entry(m.sender.clone())
-                                    .or_insert(0);
-                                *count += 1;
-                                router_stats.errors_total.fetch_add(1, Relaxed);
-                                error!(
-                                    sender = %m.sender,
-                                    consecutive = *count,
-                                    "LLM error: {e}"
-                                );
-                                if *count >= MAX_CONSECUTIVE_ERRORS {
-                                    if let Some(t) = ack_task { t.abort(); }
-                                    continue;
+                                // Try fallback LLM if available.
+                                if let Some(ref fb) = router_fallback {
+                                    warn!(
+                                        sender = %m.sender,
+                                        primary_error = %e,
+                                        "primary LLM failed, trying fallback"
+                                    );
+                                    match session.reply(
+                                        fb.as_ref(),
+                                        &mut budget,
+                                        &user_text,
+                                        &images,
+                                        memory.as_mut(),
+                                        &router_config,
+                                        Some(Arc::clone(&cron_store)),
+                                        Some(Arc::clone(&router_flow_store)),
+                                        Some(Arc::clone(&router_mcp_clients)),
+                                        Some(Arc::clone(&router_skill_store)),
+                                    ).await {
+                                        Ok(text) => {
+                                            info!(sender = %m.sender, "fallback LLM succeeded");
+                                            consecutive_errors.remove(&m.sender);
+                                            session.save();
+                                            text
+                                        }
+                                        Err(e2) => {
+                                            let count = consecutive_errors
+                                                .entry(m.sender.clone())
+                                                .or_insert(0);
+                                            *count += 1;
+                                            router_stats.errors_total.fetch_add(1, Relaxed);
+                                            error!(
+                                                sender = %m.sender,
+                                                consecutive = *count,
+                                                "both primary and fallback LLM failed: {e2}"
+                                            );
+                                            if *count >= MAX_CONSECUTIVE_ERRORS {
+                                                if let Some(t) = ack_task { t.abort(); }
+                                                continue;
+                                            }
+                                            "⚠️ 일시적으로 응답할 수 없어. 잠시 후 다시 말해줘.".to_string()
+                                        }
+                                    }
+                                } else {
+                                    let count = consecutive_errors
+                                        .entry(m.sender.clone())
+                                        .or_insert(0);
+                                    *count += 1;
+                                    router_stats.errors_total.fetch_add(1, Relaxed);
+                                    error!(
+                                        sender = %m.sender,
+                                        consecutive = *count,
+                                        "LLM error: {e}"
+                                    );
+                                    if *count >= MAX_CONSECUTIVE_ERRORS {
+                                        if let Some(t) = ack_task { t.abort(); }
+                                        continue;
+                                    }
+                                    format!("⚠️ 오류가 발생했어: {e}")
                                 }
-                                format!("⚠️ 오류가 발생했어: {e}")
                             }
                         };
 

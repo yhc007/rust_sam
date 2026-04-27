@@ -241,6 +241,12 @@ impl ConversationSession {
             self.tools.clone()
         };
         let tools_slice = &api_tools;
+        info!(
+            total_tools = self.tools.len(),
+            api_tools = api_tools.len(),
+            names = ?api_tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            "tool limiting applied"
+        );
         let mut total_input = 0u32;
         let mut total_output = 0u32;
 
@@ -342,18 +348,28 @@ impl ConversationSession {
                 "conversation turn complete"
             );
 
+            // Handle empty response from LLM.
+            let final_text = if resp.text.trim().is_empty() {
+                warn!(handle = %self.handle, "LLM returned empty response");
+                "미안, 응답을 생성하지 못했어. 다시 말해줘.".to_string()
+            } else {
+                resp.text
+            };
+
             // Append final assistant message.
-            self.history.push(ChatMessage::text("assistant", &resp.text));
+            self.history.push(ChatMessage::text("assistant", &final_text));
             self.trim_history();
 
             // Auto-store conversation in memory.
             if let Some(mem) = mem_opt.as_deref_mut() {
-                if let Err(e) = mem.store_conversation(&self.handle, user_text, &resp.text) {
-                    warn!(error = %e, "failed to store conversation memory");
+                if !final_text.starts_with("미안, 응답을") {
+                    if let Err(e) = mem.store_conversation(&self.handle, user_text, &final_text) {
+                        warn!(error = %e, "failed to store conversation memory");
+                    }
                 }
             }
 
-            return Ok(resp.text);
+            return Ok(final_text);
         }
 
         warn!(

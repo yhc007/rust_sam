@@ -129,6 +129,21 @@ pub struct LlmConfig {
     /// 0 = disabled.
     #[serde(default = "LlmConfig::default_ack_delay")]
     pub ack_delay_secs: u64,
+    /// Optional fallback LLM configuration. Used when the primary provider
+    /// returns errors (503, network issues, etc.).
+    #[serde(default)]
+    pub fallback: Option<LlmFallbackConfig>,
+}
+
+/// Minimal config for fallback LLM — fields not specified inherit from primary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmFallbackConfig {
+    pub provider: String,
+    pub model: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub api_key_source: Option<String>,
 }
 
 impl LlmConfig {
@@ -144,6 +159,20 @@ impl LlmConfig {
     fn default_max_context_tokens() -> usize { 16_000 }
     fn default_max_summary_chars() -> usize { 1200 }
     fn default_ack_delay() -> u64 { 5 }
+
+    /// Build an LlmConfig for the fallback provider by merging fallback overrides
+    /// with the primary config (inheriting timeouts, retries, etc.).
+    pub fn fallback_config(&self) -> Option<LlmConfig> {
+        let fb = self.fallback.as_ref()?;
+        Some(LlmConfig {
+            provider: fb.provider.clone(),
+            model: fb.model.clone(),
+            base_url: fb.base_url.clone().unwrap_or_else(|| self.base_url.clone()),
+            api_key_source: fb.api_key_source.clone().or_else(|| self.api_key_source.clone()),
+            fallback: None,
+            ..self.clone()
+        })
+    }
 }
 
 impl Default for LlmConfig {
@@ -162,6 +191,7 @@ impl Default for LlmConfig {
             max_context_tokens: Self::default_max_context_tokens(),
             max_summary_chars: Self::default_max_summary_chars(),
             ack_delay_secs: Self::default_ack_delay(),
+            fallback: None,
         }
     }
 }

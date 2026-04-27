@@ -62,6 +62,8 @@ pub const CORE_TOOL_NAMES: &[&str] = &[
     "claude_code",
     "notion_create_page",
     "handoff_to_agent",
+    "music_control",
+    "weather_check",
 ];
 
 /// Maximum number of tool definitions to send to the API.
