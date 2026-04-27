@@ -355,7 +355,7 @@ pub async fn run() -> i32 {
         // Cooldown: timestamp of last reply sent per handle.
         // Ignore incoming messages within ECHO_COOLDOWN_MS of our last reply.
         let mut last_reply_time: HashMap<String, std::time::Instant> = HashMap::new();
-        const ECHO_COOLDOWN_MS: u64 = 3000;
+        const ECHO_COOLDOWN_MS: u64 = 8000;
 
         loop {
             tokio::select! {
@@ -366,6 +366,17 @@ pub async fn run() -> i32 {
                         router_stats.last_message_at.store(
                             chrono::Utc::now().timestamp() as u64, Relaxed,
                         );
+
+                        // Skip empty messages (read receipts, delivery receipts,
+                        // tapback reactions with no text, etc.).
+                        if m.text.trim().is_empty() && m.attachments.is_empty() {
+                            tracing::debug!(
+                                sender = %m.sender,
+                                rowid = m.rowid,
+                                "skipping empty message"
+                            );
+                            continue;
+                        }
 
                         // Cooldown: skip messages arriving too soon after
                         // we sent a reply — they are almost certainly echoes
@@ -523,6 +534,10 @@ pub async fn run() -> i32 {
                         }
 
                         let session = sessions.get_mut(&session_key).unwrap();
+
+                        // Register "..." ack text in sent_texts so echo
+                        // detection can catch it when it bounces back.
+                        sent_texts.insert(normalize_for_dedup("..."), std::time::Instant::now());
 
                         // Spawn ack timer — sends "..." if reply takes too long.
                         let ack_delay = router_config.llm.ack_delay_secs;
