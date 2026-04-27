@@ -423,7 +423,7 @@ async fn cmd_plugins(plugin_store: Option<&Arc<Mutex<PluginStore>>>) -> String {
 async fn cmd_plugin_action(arg: &str, plugin_store: Option<&Arc<Mutex<PluginStore>>>) -> String {
     let parts: Vec<&str> = arg.splitn(2, ' ').collect();
     let action = parts.first().copied().unwrap_or("help");
-    let name = parts.get(1).copied().unwrap_or("");
+    let name = parts.get(1).copied().unwrap_or("").trim();
 
     match action {
         "enable" => {
@@ -477,7 +477,7 @@ async fn cmd_plugin_action(arg: &str, plugin_store: Option<&Arc<Mutex<PluginStor
             match s.get(name) {
                 Some(p) => {
                     let mut out = format!(
-                        "🔌 {} v{}\n{}\n작성자: {}\n상태: {}\n경로: {}\n\n",
+                        "🔌 {} v{}\n{}\n작성자: {}\n상태: {}\n경로: {}\n",
                         p.manifest.name,
                         p.manifest.version,
                         p.manifest.description,
@@ -485,6 +485,21 @@ async fn cmd_plugin_action(arg: &str, plugin_store: Option<&Arc<Mutex<PluginStor
                         if p.manifest.enabled { "활성" } else { "비활성" },
                         p.path.display(),
                     );
+                    // Show source if installed from marketplace.
+                    let source_path = p.path.join(".sam_source.json");
+                    if source_path.exists() {
+                        if let Ok(data) = std::fs::read_to_string(&source_path) {
+                            if let Ok(info) = serde_json::from_str::<serde_json::Value>(&data) {
+                                if let Some(repo) = info["repo"].as_str() {
+                                    out.push_str(&format!("소스: github.com/{repo}\n"));
+                                }
+                                if let Some(at) = info["installed_at"].as_str() {
+                                    out.push_str(&format!("설치일: {}\n", &at[..10]));
+                                }
+                            }
+                        }
+                    }
+                    out.push('\n');
                     if !p.tools.is_empty() {
                         out.push_str("도구:\n");
                         for t in &p.tools {
@@ -497,21 +512,201 @@ async fn cmd_plugin_action(arg: &str, plugin_store: Option<&Arc<Mutex<PluginStor
                             out.push_str(&format!("  • {} — {}\n", a.name, a.description));
                         }
                     }
+                    let missing = p.check_requirements();
+                    if !missing.is_empty() {
+                        out.push_str(&format!("\n⚠️ 미설치 요구사항: {}", missing.join(", ")));
+                    }
                     out
                 }
                 None => format!("'{}' 플러그인을 찾을 수 없어.", name),
             }
         }
+        "install" => {
+            if name.is_empty() {
+                return "사용법: /plugin install <owner/repo> 또는 <owner/repo/subdir>\n\
+                         예: /plugin install yhc007/sam-plugin-weather"
+                    .to_string();
+            }
+            let store = match plugin_store {
+                Some(s) => s,
+                None => return "플러그인 시스템 비활성.".to_string(),
+            };
+
+            // Check registry first if just a name (no slash).
+            let source = if !name.contains('/') {
+                // Look up in registry.
+                match sam_core::Registry::load_cache() {
+                    Some(reg) => match reg.find(name) {
+                        Some(entry) => entry.repo.clone(),
+                        None => {
+                            return format!(
+                                "레지스트리에서 '{name}'을 찾을 수 없어.\n\
+                                 /plugin search {name} 으로 검색하거나,\n\
+                                 /plugin install owner/repo 형식으로 직접 설치해."
+                            );
+                        }
+                    },
+                    None => {
+                        return "레지스트리 캐시가 없어. 먼저 /plugin refresh 실행 후 다시 시도하거나,\n\
+                             /plugin install owner/repo 형식으로 직접 설치해."
+                            .to_string();
+                    }
+                }
+            } else {
+                name.to_string()
+            };
+
+            let mut s = store.lock().await;
+            match s.install_from_github(&source) {
+                Ok(msg) => msg,
+                Err(e) => format!("❌ 설치 실패: {e}"),
+            }
+        }
+        "uninstall" | "remove" => {
+            if name.is_empty() {
+                return "사용법: /plugin uninstall <이름>".to_string();
+            }
+            let store = match plugin_store {
+                Some(s) => s,
+                None => return "플러그인 시스템 비활성.".to_string(),
+            };
+            let mut s = store.lock().await;
+            match s.uninstall(name) {
+                Ok(msg) => msg,
+                Err(e) => format!("❌ 삭제 실패: {e}"),
+            }
+        }
+        "update" => {
+            if name.is_empty() {
+                return "사용법: /plugin update <이름>".to_string();
+            }
+            let store = match plugin_store {
+                Some(s) => s,
+                None => return "플러그인 시스템 비활성.".to_string(),
+            };
+            let mut s = store.lock().await;
+            match s.update(name) {
+                Ok(msg) => format!("🔄 업데이트 완료\n{msg}"),
+                Err(e) => format!("❌ 업데이트 실패: {e}"),
+            }
+        }
+        "search" => {
+            if name.is_empty() {
+                return "사용법: /plugin search <검색어>".to_string();
+            }
+            match sam_core::Registry::load_cache() {
+                Some(reg) => {
+                    let results = reg.search(name);
+                    if results.is_empty() {
+                        format!("'{name}'에 해당하는 플러그인이 없어.\n/plugin refresh 로 레지스트리를 갱신해봐.")
+                    } else {
+                        let mut out = format!("🔍 검색 결과 ({}개):\n\n", results.len());
+                        for entry in results {
+                            out.push_str(&format!(
+                                "  📦 {} v{} — {}\n     by {} | {}\n     /plugin install {}\n\n",
+                                entry.name,
+                                entry.version,
+                                entry.description,
+                                entry.author,
+                                if entry.tags.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("태그: {}", entry.tags.join(", "))
+                                },
+                                entry.repo,
+                            ));
+                        }
+                        out
+                    }
+                }
+                None => {
+                    "레지스트리 캐시가 없어. /plugin refresh 로 먼저 갱신해줘.".to_string()
+                }
+            }
+        }
+        "refresh" => {
+            // Fetch the registry from the remote URL.
+            let url = sam_core::DEFAULT_REGISTRY_URL;
+            match fetch_registry(url).await {
+                Ok(registry) => {
+                    let count = registry.plugins.len();
+                    registry.save_cache();
+                    format!("✅ 레지스트리 갱신 완료 — {count}개 플러그인 인덱스됨")
+                }
+                Err(e) => format!("❌ 레지스트리 갱신 실패: {e}"),
+            }
+        }
+        "browse" | "list-available" => {
+            match sam_core::Registry::load_cache() {
+                Some(reg) => {
+                    if reg.plugins.is_empty() {
+                        return "레지스트리가 비어있어.".to_string();
+                    }
+                    let mut out = format!("📦 사용 가능한 플러그인 ({}개):\n\n", reg.plugins.len());
+                    let store = match plugin_store {
+                        Some(s) => Some(s.lock().await),
+                        None => None,
+                    };
+                    for entry in &reg.plugins {
+                        let installed = store
+                            .as_ref()
+                            .map(|s| s.get(&entry.name).is_some())
+                            .unwrap_or(false);
+                        let status = if installed { " [설치됨]" } else { "" };
+                        out.push_str(&format!(
+                            "  {} {} v{}{} — {}\n",
+                            if installed { "✅" } else { "📦" },
+                            entry.name,
+                            entry.version,
+                            status,
+                            entry.description,
+                        ));
+                    }
+                    out.push_str("\n설치: /plugin install <이름>");
+                    out
+                }
+                None => {
+                    "레지스트리 캐시가 없어. /plugin refresh 로 먼저 갱신해줘.".to_string()
+                }
+            }
+        }
         _ => {
             "🔌 플러그인 명령어\n\n\
+             📋 관리:\n\
              /plugins — 설치된 플러그인 목록\n\
              /plugin info <이름> — 상세 정보\n\
              /plugin enable <이름> — 활성화\n\
              /plugin disable <이름> — 비활성화\n\
-             /plugin reload — 전체 리로드"
+             /plugin reload — 전체 리로드\n\n\
+             🏪 마켓플레이스:\n\
+             /plugin refresh — 레지스트리 갱신\n\
+             /plugin browse — 사용 가능한 플러그인 목록\n\
+             /plugin search <검색어> — 플러그인 검색\n\
+             /plugin install <owner/repo> — GitHub에서 설치\n\
+             /plugin install <이름> — 레지스트리에서 설치\n\
+             /plugin update <이름> — 플러그인 업데이트\n\
+             /plugin uninstall <이름> — 플러그인 삭제"
                 .to_string()
         }
     }
+}
+
+/// Fetch the registry JSON from a remote URL.
+async fn fetch_registry(url: &str) -> Result<sam_core::Registry, String> {
+    let output = tokio::process::Command::new("curl")
+        .args(["-sL", "--max-time", "15", url])
+        .output()
+        .await
+        .map_err(|e| format!("curl 실행 실패: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("HTTP 요청 실패: {stderr}"));
+    }
+
+    let body = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str::<sam_core::Registry>(&body)
+        .map_err(|e| format!("JSON 파싱 실패: {e}"))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────

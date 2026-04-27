@@ -216,6 +216,287 @@ pub fn plugins_dir() -> PathBuf {
     sam_home().join("plugins")
 }
 
+/// Path to the local registry cache `~/.sam/state/registry.json`.
+pub fn registry_cache_path() -> PathBuf {
+    sam_home().join("state").join("registry.json")
+}
+
+// ── Marketplace ─────────────────────────────────────────────────────────
+
+/// Default registry URL (GitHub-hosted JSON index).
+pub const DEFAULT_REGISTRY_URL: &str =
+    "https://raw.githubusercontent.com/yhc007/sam-plugins/main/registry.json";
+
+/// A plugin entry in the remote registry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryEntry {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub author: String,
+    /// GitHub repo in "owner/repo" format.
+    pub repo: String,
+    /// Optional subdirectory within the repo.
+    #[serde(default)]
+    pub subdir: String,
+    /// Tags for search.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Minimum Sam version required (empty = any).
+    #[serde(default)]
+    pub min_sam_version: String,
+}
+
+/// The full registry (list of available plugins).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Registry {
+    /// Schema version for the registry format.
+    #[serde(default = "default_registry_version")]
+    pub version: u32,
+    pub plugins: Vec<RegistryEntry>,
+}
+
+fn default_registry_version() -> u32 {
+    1
+}
+
+impl Registry {
+    /// Load from a local cache file.
+    pub fn load_cache() -> Option<Self> {
+        let path = registry_cache_path();
+        let content = fs::read_to_string(path).ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    /// Save to local cache.
+    pub fn save_cache(&self) {
+        let path = registry_cache_path();
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(self) {
+            let _ = fs::write(path, json);
+        }
+    }
+
+    /// Search plugins by query (matches name, description, tags).
+    pub fn search(&self, query: &str) -> Vec<&RegistryEntry> {
+        let q = query.to_lowercase();
+        self.plugins
+            .iter()
+            .filter(|p| {
+                p.name.to_lowercase().contains(&q)
+                    || p.description.to_lowercase().contains(&q)
+                    || p.tags.iter().any(|t| t.to_lowercase().contains(&q))
+            })
+            .collect()
+    }
+
+    /// Find a plugin by exact name.
+    pub fn find(&self, name: &str) -> Option<&RegistryEntry> {
+        self.plugins.iter().find(|p| p.name == name)
+    }
+}
+
+impl PluginStore {
+    /// Install a plugin from a GitHub repo URL.
+    /// Supports formats:
+    /// - "owner/repo" (uses the whole repo as plugin)
+    /// - "owner/repo/subdir" (specific directory within repo)
+    /// - Full URL "https://github.com/owner/repo"
+    pub fn install_from_github(&mut self, source: &str) -> Result<String, String> {
+        let (owner, repo, subdir) = parse_github_source(source)?;
+        let repo_url = format!("https://github.com/{owner}/{repo}.git");
+
+        let plugins_dir = plugins_dir();
+        let _ = fs::create_dir_all(&plugins_dir);
+
+        // Determine plugin name from subdir or repo.
+        let plugin_name = if subdir.is_empty() {
+            repo.clone()
+        } else {
+            subdir.split('/').next_back().unwrap_or(&repo).to_string()
+        };
+
+        let dest = plugins_dir.join(&plugin_name);
+        if dest.exists() {
+            return Err(format!(
+                "플러그인 '{plugin_name}' 이미 설치됨. 업데이트: /plugin update {plugin_name}"
+            ));
+        }
+
+        // Clone the repo (or download).
+        if subdir.is_empty() {
+            // Simple clone.
+            let output = std::process::Command::new("git")
+                .args(["clone", "--depth", "1", &repo_url, &dest.to_string_lossy()])
+                .output()
+                .map_err(|e| format!("git clone 실행 실패: {e}"))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("git clone 실패: {stderr}"));
+            }
+
+            // Remove .git directory to save space.
+            let _ = fs::remove_dir_all(dest.join(".git"));
+        } else {
+            // Clone to temp, copy subdir.
+            let tmp = std::env::temp_dir().join(format!("sam_plugin_clone_{repo}"));
+            let _ = fs::remove_dir_all(&tmp);
+
+            let output = std::process::Command::new("git")
+                .args(["clone", "--depth", "1", &repo_url, &tmp.to_string_lossy()])
+                .output()
+                .map_err(|e| format!("git clone 실행 실패: {e}"))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let _ = fs::remove_dir_all(&tmp);
+                return Err(format!("git clone 실패: {stderr}"));
+            }
+
+            let src = tmp.join(&subdir);
+            if !src.exists() {
+                let _ = fs::remove_dir_all(&tmp);
+                return Err(format!("서브디렉토리 '{subdir}' 를 찾을 수 없습니다."));
+            }
+
+            copy_dir_recursive(&src, &dest)
+                .map_err(|e| format!("복사 실패: {e}"))?;
+            let _ = fs::remove_dir_all(&tmp);
+        }
+
+        // Verify plugin.toml exists.
+        if !dest.join("plugin.toml").exists() {
+            let _ = fs::remove_dir_all(&dest);
+            return Err("다운로드한 디렉토리에 plugin.toml이 없습니다.".to_string());
+        }
+
+        // Store source info for updates.
+        let source_info = serde_json::json!({
+            "source": source,
+            "repo": format!("{owner}/{repo}"),
+            "subdir": subdir,
+            "installed_at": chrono::Local::now().to_rfc3339(),
+        });
+        let _ = fs::write(
+            dest.join(".sam_source.json"),
+            serde_json::to_string_pretty(&source_info).unwrap_or_default(),
+        );
+
+        self.reload();
+
+        let msg = match self.get(&plugin_name) {
+            Some(p) => format!(
+                "✅ 플러그인 '{}' v{} 설치 완료\n도구 {}개, 에이전트 {}개",
+                p.manifest.name,
+                p.manifest.version,
+                p.tools.len(),
+                p.agents.len(),
+            ),
+            None => "⚠️ 설치는 됐지만 로드에 실패했습니다. 로그를 확인하세요.".to_string(),
+        };
+        Ok(msg)
+    }
+
+    /// Uninstall a plugin by name.
+    pub fn uninstall(&mut self, name: &str) -> Result<String, String> {
+        let dir = plugins_dir().join(name);
+        if !dir.exists() {
+            return Err(format!("플러그인 '{name}' 을 찾을 수 없습니다."));
+        }
+        fs::remove_dir_all(&dir)
+            .map_err(|e| format!("삭제 실패: {e}"))?;
+        self.reload();
+        Ok(format!("🗑️ 플러그인 '{name}' 삭제 완료"))
+    }
+
+    /// Update a plugin by re-downloading from its source.
+    pub fn update(&mut self, name: &str) -> Result<String, String> {
+        let dir = plugins_dir().join(name);
+        if !dir.exists() {
+            return Err(format!("플러그인 '{name}' 을 찾을 수 없습니다."));
+        }
+
+        // Read source info.
+        let source_path = dir.join(".sam_source.json");
+        let source = if source_path.exists() {
+            let data = fs::read_to_string(&source_path)
+                .map_err(|e| format!("소스 정보 읽기 실패: {e}"))?;
+            let info: serde_json::Value = serde_json::from_str(&data)
+                .map_err(|_| "소스 정보 파싱 실패".to_string())?;
+            info["source"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        } else {
+            return Err(format!(
+                "플러그인 '{name}'의 설치 소스 정보가 없습니다. 수동 재설치가 필요합니다."
+            ));
+        };
+
+        if source.is_empty() {
+            return Err("소스 정보가 비어있습니다.".to_string());
+        }
+
+        // Remove old version.
+        fs::remove_dir_all(&dir)
+            .map_err(|e| format!("기존 버전 삭제 실패: {e}"))?;
+
+        // Re-install.
+        self.install_from_github(&source)
+    }
+
+    /// List installed plugins with update info.
+    pub fn list_with_source(&self) -> Vec<(&Plugin, Option<String>)> {
+        self.plugins
+            .values()
+            .map(|p| {
+                let source = p.path.join(".sam_source.json");
+                let repo = if source.exists() {
+                    fs::read_to_string(&source)
+                        .ok()
+                        .and_then(|d| serde_json::from_str::<serde_json::Value>(&d).ok())
+                        .and_then(|v| v["repo"].as_str().map(String::from))
+                } else {
+                    None
+                };
+                (p, repo)
+            })
+            .collect()
+    }
+}
+
+/// Parse a GitHub source string into (owner, repo, subdir).
+/// Supports: "owner/repo", "owner/repo/subdir/path", "https://github.com/owner/repo"
+fn parse_github_source(source: &str) -> Result<(String, String, String), String> {
+    let cleaned = source
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches(".git");
+
+    // Strip GitHub URL prefix if present.
+    let path = if let Some(rest) = cleaned.strip_prefix("https://github.com/") {
+        rest.to_string()
+    } else if let Some(rest) = cleaned.strip_prefix("github.com/") {
+        rest.to_string()
+    } else {
+        cleaned.to_string()
+    };
+
+    let parts: Vec<&str> = path.splitn(3, '/').collect();
+    match parts.len() {
+        0 | 1 => Err("형식: owner/repo 또는 owner/repo/subdir".to_string()),
+        2 => Ok((parts[0].to_string(), parts[1].to_string(), String::new())),
+        _ => Ok((
+            parts[0].to_string(),
+            parts[1].to_string(),
+            parts[2].to_string(),
+        )),
+    }
+}
+
 // ── Internal ────────────────────────────────────────────────────────────
 
 fn load_plugins_from_dir(dir: &Path) -> HashMap<String, Plugin> {
@@ -602,5 +883,98 @@ enabled = true
 
         let _ = fs::remove_dir_all(&src);
         let _ = fs::remove_dir_all(&dest_root);
+    }
+
+    #[test]
+    fn parse_github_source_owner_repo() {
+        let (owner, repo, subdir) = parse_github_source("yhc007/sam-plugin-weather").unwrap();
+        assert_eq!(owner, "yhc007");
+        assert_eq!(repo, "sam-plugin-weather");
+        assert_eq!(subdir, "");
+    }
+
+    #[test]
+    fn parse_github_source_with_subdir() {
+        let (owner, repo, subdir) = parse_github_source("yhc007/sam-plugins/plugins/weather").unwrap();
+        assert_eq!(owner, "yhc007");
+        assert_eq!(repo, "sam-plugins");
+        assert_eq!(subdir, "plugins/weather");
+    }
+
+    #[test]
+    fn parse_github_source_full_url() {
+        let (owner, repo, subdir) = parse_github_source("https://github.com/yhc007/my-plugin.git").unwrap();
+        assert_eq!(owner, "yhc007");
+        assert_eq!(repo, "my-plugin");
+        assert_eq!(subdir, "");
+    }
+
+    #[test]
+    fn parse_github_source_invalid() {
+        assert!(parse_github_source("just-a-name").is_err());
+        assert!(parse_github_source("").is_err());
+    }
+
+    #[test]
+    fn registry_search_matches() {
+        let registry = Registry {
+            version: 1,
+            plugins: vec![
+                RegistryEntry {
+                    name: "weather".to_string(),
+                    version: "1.0.0".to_string(),
+                    description: "날씨 조회 플러그인".to_string(),
+                    author: "paul".to_string(),
+                    repo: "yhc007/sam-plugin-weather".to_string(),
+                    subdir: String::new(),
+                    tags: vec!["weather".to_string(), "api".to_string()],
+                    min_sam_version: String::new(),
+                },
+                RegistryEntry {
+                    name: "translator".to_string(),
+                    version: "0.5.0".to_string(),
+                    description: "번역 도구".to_string(),
+                    author: "paul".to_string(),
+                    repo: "yhc007/sam-plugin-translator".to_string(),
+                    subdir: String::new(),
+                    tags: vec!["translate".to_string(), "language".to_string()],
+                    min_sam_version: String::new(),
+                },
+            ],
+        };
+
+        let results = registry.search("날씨");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "weather");
+
+        let results = registry.search("api");
+        assert_eq!(results.len(), 1);
+
+        let results = registry.search("language");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "translator");
+
+        let results = registry.search("xyz_nothing");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn registry_find_by_name() {
+        let registry = Registry {
+            version: 1,
+            plugins: vec![RegistryEntry {
+                name: "weather".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Weather".to_string(),
+                author: "paul".to_string(),
+                repo: "yhc007/weather".to_string(),
+                subdir: String::new(),
+                tags: vec![],
+                min_sam_version: String::new(),
+            }],
+        };
+
+        assert!(registry.find("weather").is_some());
+        assert!(registry.find("nonexistent").is_none());
     }
 }
