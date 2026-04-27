@@ -93,6 +93,11 @@ impl AgentStore {
         Self { agents }
     }
 
+    /// Create from an existing map (useful for tests).
+    pub fn from_map(agents: BTreeMap<String, AgentDef>) -> Self {
+        Self { agents }
+    }
+
     /// Get an agent by name.
     pub fn get(&self, name: &str) -> Option<&AgentDef> {
         self.agents.get(name)
