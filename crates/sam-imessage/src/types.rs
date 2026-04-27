@@ -33,4 +33,6 @@ pub struct IncomingMessage {
 pub struct OutgoingMessage {
     pub handle: String,
     pub body: String,
+    /// Optional file path to attach (image, PDF, etc.).
+    pub attachment: Option<String>,
 }

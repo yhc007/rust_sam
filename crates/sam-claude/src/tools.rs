@@ -342,6 +342,65 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["title", "content"]
             }),
         },
+        ToolDefinition {
+            name: "generate_image".to_string(),
+            description: "AI 이미지를 생성한다. DALL-E API를 사용해 프롬프트 기반 이미지 생성. 결과는 iMessage로 첨부 전송된다.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "생성할 이미지를 설명하는 프롬프트 (영어 권장)"
+                    },
+                    "size": {
+                        "type": "string",
+                        "description": "이미지 크기: 1024x1024, 1792x1024, 1024x1792 (기본: 1024x1024)",
+                        "default": "1024x1024"
+                    },
+                    "style": {
+                        "type": "string",
+                        "description": "스타일: natural 또는 vivid (기본: vivid)",
+                        "default": "vivid"
+                    }
+                },
+                "required": ["prompt"]
+            }),
+        },
+        ToolDefinition {
+            name: "generate_chart".to_string(),
+            description: "데이터 차트/그래프를 생성한다. matplotlib로 PNG 이미지를 만들어 iMessage로 첨부 전송. 막대, 선, 파이 차트 등 지원.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "chart_type": {
+                        "type": "string",
+                        "description": "차트 종류: bar, line, pie, scatter, histogram"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "차트 제목"
+                    },
+                    "data": {
+                        "type": "object",
+                        "description": "차트 데이터. labels(배열)와 values(배열 또는 {시리즈명: 배열} 객체) 포함",
+                        "properties": {
+                            "labels": {
+                                "type": "array",
+                                "items": { "type": "string" }
+                            },
+                            "values": {
+                                "description": "숫자 배열 또는 {시리즈명: 숫자배열} 객���"
+                            }
+                        }
+                    },
+                    "python_code": {
+                        "type": "string",
+                        "description": "직접 matplotlib Python 코드를 작성 (data/chart_type 대신 사용 가능). plt.savefig(output_path)로 끝나야 함."
+                    }
+                },
+                "required": ["title"]
+            }),
+        },
     ]
 }
 
@@ -383,6 +442,8 @@ pub async fn execute_builtin_no_flow(
         "notion_create_page" => exec_notion_create_page(input, ctx).await,
         "handoff_to_agent" => exec_handoff(input),
         "browser" => exec_browser(input, ctx).await,
+        "generate_image" => exec_generate_image(input, ctx).await,
+        "generate_chart" => exec_generate_chart(input, ctx).await,
         _ => {
             // Try custom skill store first.
             if let Some(skill_store) = &ctx.skill_store {
@@ -1418,6 +1479,182 @@ async fn execute_custom_skill(
     }
 }
 
+// ── Image generation (DALL-E API) ─────────────────────────────────────
+
+/// Generate an image via OpenAI DALL-E API. Returns a special
+/// `__ATTACHMENT__:/path/to/image.png` marker that the daemon intercepts.
+async fn exec_generate_image(
+    input: &serde_json::Value,
+    _ctx: &ToolContext<'_>,
+) -> Result<String, String> {
+    let prompt = input["prompt"].as_str().ok_or("prompt is required")?;
+    let size = input["size"].as_str().unwrap_or("1024x1024");
+    let style = input["style"].as_str().unwrap_or("vivid");
+
+    // Read OpenAI API key from config or env.
+    let api_key = std::env::var("OPENAI_API_KEY")
+        .or_else(|_| {
+            let key_path = sam_core::sam_home().join("openai_api_key");
+            std::fs::read_to_string(key_path).map(|s| s.trim().to_string())
+        })
+        .map_err(|_| "OPENAI_API_KEY not set and ~/.sam/openai_api_key not found".to_string())?;
+
+    let output_dir = sam_core::state_dir().join("generated");
+    std::fs::create_dir_all(&output_dir)
+        .map_err(|e| format!("failed to create output dir: {e}"))?;
+
+    let filename = format!("img_{}.png", chrono::Utc::now().timestamp_millis());
+    let output_path = output_dir.join(&filename);
+
+    // Call DALL-E API.
+    let body = json!({
+        "model": "dall-e-3",
+        "prompt": prompt,
+        "n": 1,
+        "size": size,
+        "style": style,
+        "response_format": "url"
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://api.openai.com/v1/images/generations")
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("DALL-E API request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("DALL-E API error {status}: {text}"));
+    }
+
+    let resp_json: serde_json::Value = resp.json().await
+        .map_err(|e| format!("failed to parse DALL-E response: {e}"))?;
+
+    let image_url = resp_json["data"][0]["url"].as_str()
+        .ok_or("no URL in DALL-E response")?;
+
+    // Download the image.
+    let image_bytes = client.get(image_url).send().await
+        .map_err(|e| format!("failed to download image: {e}"))?
+        .bytes().await
+        .map_err(|e| format!("failed to read image bytes: {e}"))?;
+
+    std::fs::write(&output_path, &image_bytes)
+        .map_err(|e| format!("failed to save image: {e}"))?;
+
+    let path_str = output_path.to_string_lossy().to_string();
+    info!(path = %path_str, prompt = %prompt, "image generated");
+
+    Ok(format!("__ATTACHMENT__:{path_str}\n이미지를 생성했어. ({size}, {style})"))
+}
+
+// ── Chart generation (matplotlib) ─────────────────────────────────────
+
+/// Generate a chart via matplotlib. Returns `__ATTACHMENT__:/path` marker.
+async fn exec_generate_chart(
+    input: &serde_json::Value,
+    _ctx: &ToolContext<'_>,
+) -> Result<String, String> {
+    let title = input["title"].as_str().unwrap_or("Chart");
+    let chart_type = input["chart_type"].as_str().unwrap_or("bar");
+
+    let output_dir = sam_core::state_dir().join("generated");
+    std::fs::create_dir_all(&output_dir)
+        .map_err(|e| format!("failed to create output dir: {e}"))?;
+
+    let filename = format!("chart_{}.png", chrono::Utc::now().timestamp_millis());
+    let output_path = output_dir.join(&filename);
+    let output_path_str = output_path.to_string_lossy().to_string();
+
+    // If custom python_code is provided, use it directly.
+    let python_code = if let Some(code) = input["python_code"].as_str() {
+        code.replace("output_path", &format!("'{output_path_str}'"))
+    } else {
+        // Build matplotlib code from structured data.
+        let labels: Vec<String> = input["data"]["labels"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+
+        let values_json = &input["data"]["values"];
+
+        let data_code = if let Some(arr) = values_json.as_array() {
+            // Simple array of numbers.
+            let vals: Vec<f64> = arr.iter().filter_map(|v| v.as_f64()).collect();
+            format!("labels = {:?}\nvalues = {:?}\n", labels, vals)
+        } else if let Some(obj) = values_json.as_object() {
+            // Multi-series: {name: [values]}
+            let mut code = format!("labels = {:?}\n", labels);
+            for (name, vals) in obj {
+                let nums: Vec<f64> = vals.as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_f64()).collect())
+                    .unwrap_or_default();
+                code.push_str(&format!("{name} = {:?}\n", nums));
+            }
+            code
+        } else {
+            "labels = []\nvalues = []\n".to_string()
+        };
+
+        let plot_code = match chart_type {
+            "pie" => "plt.pie(values, labels=labels, autopct='%1.1f%%')\n".to_string(),
+            "line" => "plt.plot(labels, values, marker='o')\n".to_string(),
+            "scatter" => "plt.scatter(range(len(values)), values)\nplt.xticks(range(len(labels)), labels)\n".to_string(),
+            "histogram" => "plt.hist(values, bins='auto', edgecolor='black')\n".to_string(),
+            _ => "plt.bar(labels, values)\n".to_string(), // default: bar
+        };
+
+        format!(
+            "import matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\n\
+             plt.rcParams['font.family'] = 'AppleGothic'\n\
+             plt.rcParams['axes.unicode_minus'] = False\n\
+             {data_code}\n\
+             plt.figure(figsize=(10, 6))\n\
+             {plot_code}\
+             plt.title('{title}')\n\
+             plt.tight_layout()\n\
+             plt.savefig('{output_path_str}', dpi=150, bbox_inches='tight')\n\
+             plt.close()\n\
+             print('ok')\n"
+        )
+    };
+
+    // Write script to temp file and execute.
+    let script_path = output_dir.join("_chart_script.py");
+    std::fs::write(&script_path, &python_code)
+        .map_err(|e| format!("failed to write chart script: {e}"))?;
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(30),
+        Command::new("python3").arg(&script_path).output(),
+    )
+    .await;
+
+    // Clean up script.
+    let _ = std::fs::remove_file(&script_path);
+
+    match result {
+        Ok(Ok(output)) => {
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("chart generation failed: {stderr}"));
+            }
+            if !output_path.exists() {
+                return Err("chart file was not created".to_string());
+            }
+            info!(path = %output_path_str, chart_type = %chart_type, "chart generated");
+            Ok(format!("__ATTACHMENT__:{output_path_str}\n차트를 생성했어. ({chart_type}: {title})"))
+        }
+        Ok(Err(e)) => Err(format!("python3 execution failed: {e}")),
+        Err(_) => Err("chart generation timeout (30s)".to_string()),
+    }
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 fn truncate_output(s: &str, max_bytes: usize) -> String {
@@ -1440,7 +1677,7 @@ mod tests {
     #[test]
     fn builtin_definitions_are_valid() {
         let defs = builtin_tool_definitions();
-        assert_eq!(defs.len(), 17);
+        assert_eq!(defs.len(), 19);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"memory_recall"));
         assert!(names.contains(&"run_command"));

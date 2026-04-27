@@ -202,6 +202,7 @@ pub async fn run() -> i32 {
                 let out = OutgoingMessage {
                     handle: msg.handle,
                     body: msg.body,
+                    attachment: None,
                 };
                 let _ = outbound_tx.send(out).await;
             }
@@ -243,6 +244,7 @@ pub async fn run() -> i32 {
                         let msg = OutgoingMessage {
                             handle: job.handle.clone(),
                             body: format!("⏰ {}", job.message),
+                    attachment: None,
                         };
                         info!(job_id = %job.id, message = %job.message, "cron job fired");
                         let _ = cron_outbound_tx.send(msg).await;
@@ -291,6 +293,7 @@ pub async fn run() -> i32 {
                                         let msg = sam_imessage::types::OutgoingMessage {
                                             handle: handle.clone(),
                                             body: body.clone(),
+                    attachment: None,
                                         };
                                         let _ = flow_outbound_tx.send(msg).await;
                                     }
@@ -505,6 +508,7 @@ pub async fn run() -> i32 {
                                 let _ = ack_tx.send(OutgoingMessage {
                                     handle: ack_handle,
                                     body: "...".to_string(),
+                                    attachment: None,
                                 }).await;
                             }))
                         } else {
@@ -616,6 +620,7 @@ pub async fn run() -> i32 {
                                     let out = OutgoingMessage {
                                         handle: m.sender.clone(),
                                         body: part,
+                    attachment: None,
                                     };
                                     if outbound_tx.send(out).await.is_err() {
                                         return;
@@ -643,6 +648,7 @@ pub async fn run() -> i32 {
                                 let out = OutgoingMessage {
                                     handle: m.sender.clone(),
                                     body: part,
+                    attachment: None,
                                 };
                                 if outbound_tx.send(out).await.is_err() {
                                     return;
@@ -722,12 +728,42 @@ pub async fn run() -> i32 {
                             reply
                         };
 
+                        // Attachment detection: extract __ATTACHMENT__:/path lines.
+                        let mut attachment_path: Option<String> = None;
+                        let reply = if reply.contains("__ATTACHMENT__:") {
+                            let mut clean_lines = Vec::new();
+                            for line in reply.lines() {
+                                if let Some(path) = line.strip_prefix("__ATTACHMENT__:") {
+                                    attachment_path = Some(path.to_string());
+                                } else {
+                                    clean_lines.push(line);
+                                }
+                            }
+                            clean_lines.join("\n")
+                        } else {
+                            reply
+                        };
+
                         info!(
                             sender = %m.sender,
                             rowid = m.rowid,
                             reply_len = reply.len(),
+                            attachment = ?attachment_path,
                             "reply ready"
                         );
+
+                        // If we have an attachment, send it first.
+                        if let Some(ref att_path) = attachment_path {
+                            let att_msg = OutgoingMessage {
+                                handle: m.sender.clone(),
+                                body: String::new(),
+                                attachment: Some(att_path.clone()),
+                            };
+                            if outbound_tx.send(att_msg).await.is_err() {
+                                return;
+                            }
+                            router_stats.messages_sent.fetch_add(1, Relaxed);
+                        }
 
                         // Split long messages for readability.
                         let parts = split_message(&reply, MSG_SPLIT_LEN);
@@ -747,6 +783,7 @@ pub async fn run() -> i32 {
                             let out = OutgoingMessage {
                                 handle: m.sender.clone(),
                                 body: part,
+                    attachment: None,
                             };
                             if outbound_tx.send(out).await.is_err() {
                                 return;
@@ -1012,6 +1049,7 @@ async fn heartbeat_send(
             .send(OutgoingMessage {
                 handle: handle.clone(),
                 body: text.to_string(),
+                    attachment: None,
             })
             .await;
     }

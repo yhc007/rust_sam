@@ -10,7 +10,7 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::sender::build_applescript_live;
+use crate::sender::{build_applescript_live, build_applescript_attachment};
 use crate::types::OutgoingMessage;
 
 /// Run the sender loop, consuming messages from `rx` and delivering them via
@@ -39,7 +39,12 @@ pub async fn run_sender(
             }
         };
 
-        if let Err(e) = send_with_retry(&msg.handle, &msg.body, 3).await {
+        let result = if let Some(ref attachment) = msg.attachment {
+            send_attachment_with_retry(&msg.handle, attachment, &msg.body, 3).await
+        } else {
+            send_with_retry(&msg.handle, &msg.body, 3).await
+        };
+        if let Err(e) = result {
             error!(handle = %msg.handle, "message dropped after retries: {e}");
         }
 
@@ -90,6 +95,41 @@ async fn send_with_retry(handle: &str, body: &str, max_retries: u32) -> Result<(
             backoff *= 2;
         } else {
             bail!("osascript failed after {max_retries} retries: {stderr}");
+        }
+    }
+
+    unreachable!()
+}
+
+/// Send a file attachment with exponential backoff retry.
+async fn send_attachment_with_retry(
+    handle: &str,
+    file_path: &str,
+    caption: &str,
+    max_retries: u32,
+) -> Result<()> {
+    let script = build_applescript_attachment(handle, file_path, caption);
+    let mut backoff = Duration::from_secs(1);
+
+    for attempt in 0..=max_retries {
+        let output = Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .output()
+            .await?;
+
+        if output.status.success() {
+            info!(handle, file = file_path, "attachment sent");
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if attempt < max_retries {
+            warn!(attempt, %stderr, "attachment send failed, retrying in {backoff:?}");
+            sleep(backoff).await;
+            backoff *= 2;
+        } else {
+            bail!("attachment send failed after {max_retries} retries: {stderr}");
         }
     }
 

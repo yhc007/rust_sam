@@ -49,6 +49,25 @@ pub fn build_applescript_live(handle: &str, body: &str) -> String {
     )
 }
 
+/// Build an AppleScript that sends a file attachment via Messages.app.
+/// Sends the file first, then the caption text (if non-empty).
+pub fn build_applescript_attachment(handle: &str, file_path: &str, caption: &str) -> String {
+    let h = escape_applescript(handle);
+    let f = escape_applescript(file_path);
+    let mut script = format!(
+        "tell application \"Messages\"\n\
+        \tset targetChat to chat id \"any;-;{h}\"\n\
+        \tset theFile to POSIX file \"{f}\"\n\
+        \tsend theFile to targetChat\n"
+    );
+    if !caption.is_empty() {
+        let b = escape_applescript(caption).replace('\n', "\" & return & \"");
+        script.push_str(&format!("\tsend \"{b}\" to targetChat\n"));
+    }
+    script.push_str("end tell");
+    script
+}
+
 pub fn escape_applescript(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
