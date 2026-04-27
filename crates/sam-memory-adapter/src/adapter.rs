@@ -19,6 +19,17 @@ pub struct RecallHit {
     pub similarity: f32,
 }
 
+/// Chunk of a document for RAG ingestion.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DocumentChunk {
+    /// Source identifier (filename, URL, etc.).
+    pub source: String,
+    /// Chunk index within the document.
+    pub chunk_index: usize,
+    /// The text content of this chunk.
+    pub text: String,
+}
+
 /// Ergonomic, single-owner handle to the CLS memory system.
 ///
 /// `MemoryAdapter` keeps ownership of the underlying `MemoryGuardian` and
@@ -165,6 +176,95 @@ impl MemoryAdapter {
         self.guardian.stats()
     }
 
+    // ── RAG: Document Ingestion ─────────────────────────────────────────
+
+    /// Ingest a document by chunking it and storing each chunk as a memory
+    /// tagged with the source. Returns the number of chunks stored.
+    pub fn ingest_document(
+        &mut self,
+        source: &str,
+        text: &str,
+        chunk_size: usize,
+        chunk_overlap: usize,
+    ) -> Result<usize> {
+        let chunks = chunk_text(text, chunk_size, chunk_overlap);
+        let count = chunks.len();
+
+        for (i, chunk) in chunks.iter().enumerate() {
+            if chunk.trim().is_empty() {
+                continue;
+            }
+            let tagged_text = format!("[source: {source}][chunk {}/{}] {chunk}", i + 1, count);
+            let tags = vec![
+                "document".to_string(),
+                format!("source:{source}"),
+                format!("chunk:{i}"),
+            ];
+            self.store(tagged_text, tags)?;
+        }
+
+        info!(source = %source, chunks = count, "document ingested");
+        Ok(count)
+    }
+
+    /// Hybrid recall: combines semantic similarity with keyword matching.
+    /// Boosts results that contain exact keyword matches from the query.
+    pub fn recall_hybrid(&mut self, query: &str, k: usize) -> Vec<RecallHit> {
+        // Get more candidates than needed, then re-rank.
+        let candidates = self.recall(query, k * 3);
+
+        if candidates.is_empty() {
+            return candidates;
+        }
+
+        // Extract keywords from query (3+ char tokens).
+        let keywords: Vec<String> = query
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .filter(|s| s.len() >= 2)
+            .map(|s| s.to_string())
+            .collect();
+
+        // Score each candidate: vector_similarity + keyword_boost.
+        let mut scored: Vec<(RecallHit, f32)> = candidates
+            .into_iter()
+            .map(|hit| {
+                let lower_text = hit.text.to_lowercase();
+                let keyword_score: f32 = keywords
+                    .iter()
+                    .filter(|kw| lower_text.contains(kw.as_str()))
+                    .count() as f32
+                    / keywords.len().max(1) as f32;
+
+                // Blend: 70% vector similarity + 30% keyword match.
+                let hybrid_score = hit.similarity * 0.7 + keyword_score * 0.3;
+                (hit, hybrid_score)
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k);
+
+        scored
+            .into_iter()
+            .map(|(mut hit, score)| {
+                hit.similarity = score;
+                hit
+            })
+            .collect()
+    }
+
+    /// Recall documents specifically from an ingested source.
+    pub fn recall_from_source(&mut self, query: &str, source: &str, k: usize) -> Vec<RecallHit> {
+        let candidates = self.recall(query, k * 5);
+        let source_tag = format!("source:{source}");
+        candidates
+            .into_iter()
+            .filter(|hit| hit.text.contains(&source_tag) || hit.text.contains(source))
+            .take(k)
+            .collect()
+    }
+
     // ── Persistence ────────────────────────────────────────────────────
 
     /// Save all memories to disk as JSON.
@@ -236,6 +336,61 @@ impl MemoryAdapter {
     }
 }
 
+// ── Chunking ────────────────────────────────────────────────────────
+
+/// Split text into overlapping chunks of approximately `chunk_size` characters.
+/// Prefers splitting at paragraph or sentence boundaries.
+pub fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
+    if text.is_empty() {
+        return vec![];
+    }
+    if text.chars().count() <= chunk_size {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let total = chars.len();
+    let mut start = 0;
+
+    while start < total {
+        let end = (start + chunk_size).min(total);
+        let chunk_str: String = chars[start..end].iter().collect();
+
+        // Try to find a good split point (paragraph > sentence > word).
+        let actual_end = if end < total {
+            if let Some(pos) = chunk_str.rfind("\n\n") {
+                start + pos + 2
+            } else if let Some(pos) = chunk_str.rfind(". ") {
+                start + pos + 2
+            } else if let Some(pos) = chunk_str.rfind('\n') {
+                start + pos + 1
+            } else if let Some(pos) = chunk_str.rfind(' ') {
+                start + pos + 1
+            } else {
+                end
+            }
+        } else {
+            end
+        };
+
+        let final_chunk: String = chars[start..actual_end].iter().collect();
+        if !final_chunk.trim().is_empty() {
+            chunks.push(final_chunk.trim().to_string());
+        }
+
+        // Advance with overlap.
+        let advance = if actual_end > start + overlap {
+            actual_end - start - overlap
+        } else {
+            1 // prevent infinite loop
+        };
+        start += advance;
+    }
+
+    chunks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,5 +440,54 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn chunk_text_basic() {
+        let text = "Hello world. This is a test document. It has multiple sentences.";
+        let chunks = chunk_text(text, 30, 5);
+        assert!(chunks.len() >= 2, "expected multiple chunks, got {}", chunks.len());
+        // All chunks should be non-empty.
+        for chunk in &chunks {
+            assert!(!chunk.is_empty());
+        }
+    }
+
+    #[test]
+    fn chunk_text_short_no_split() {
+        let text = "Short text";
+        let chunks = chunk_text(text, 500, 50);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], "Short text");
+    }
+
+    #[test]
+    fn chunk_text_empty() {
+        let chunks = chunk_text("", 500, 50);
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn ingest_document_stores_chunks() {
+        let mut adapter = MemoryAdapter::new(MemorySystemConfig::default()).unwrap();
+        let text = "First paragraph about Rust.\n\nSecond paragraph about Python.\n\nThird paragraph about TypeScript.";
+        let count = adapter.ingest_document("test.md", text, 40, 5).unwrap();
+        assert!(count >= 2, "expected multiple chunks, got {count}");
+
+        let hits = adapter.recall("Rust", 5);
+        assert!(!hits.is_empty(), "should find ingested content about Rust");
+    }
+
+    #[test]
+    fn hybrid_recall_boosts_keyword_matches() {
+        let mut adapter = MemoryAdapter::new(MemorySystemConfig::default()).unwrap();
+        adapter.store("Rust programming language is great", vec![]).unwrap();
+        adapter.store("Python is also popular", vec![]).unwrap();
+        adapter.store("The weather is nice today", vec![]).unwrap();
+
+        let hits = adapter.recall_hybrid("Rust programming", 3);
+        assert!(!hits.is_empty());
+        // First hit should be about Rust due to keyword boost.
+        assert!(hits[0].text.contains("Rust"), "expected Rust hit first, got: {}", hits[0].text);
     }
 }

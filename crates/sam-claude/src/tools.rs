@@ -88,6 +88,38 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "ingest_document".to_string(),
+            description: "문서를 청크로 나눠 장기 기억에 저장한다 (RAG). 파일 경로나 텍스트를 입력하면 검색 가능한 형태로 저장.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "source": {
+                        "type": "string",
+                        "description": "문서 출처 (파일명, URL 등)"
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "저장할 문서 텍스트 (직접 입력 시)"
+                    },
+                    "file_path": {
+                        "type": "string",
+                        "description": "읽을 파일 경로 (.txt, .md, .pdf). text 대신 사용."
+                    },
+                    "chunk_size": {
+                        "type": "integer",
+                        "description": "청크 크기 (문자 수, 기본 500)",
+                        "default": 500
+                    },
+                    "chunk_overlap": {
+                        "type": "integer",
+                        "description": "청크 간 겹침 (문자 수, 기본 50)",
+                        "default": 50
+                    }
+                },
+                "required": ["source"]
+            }),
+        },
+        ToolDefinition {
             name: "current_time".to_string(),
             description: "현재 날짜와 시간을 반환한다.".to_string(),
             input_schema: json!({
@@ -429,6 +461,7 @@ pub async fn execute_builtin_no_flow(
     match name {
         "memory_recall" => exec_memory_recall(input, ctx),
         "memory_store" => exec_memory_store(input, ctx),
+        "ingest_document" => exec_ingest_document(input, ctx).await,
         "current_time" => exec_current_time(),
         "run_command" => exec_run_command(input, ctx).await,
         "read_file" => exec_read_file(input),
@@ -477,7 +510,8 @@ fn exec_memory_recall(input: &serde_json::Value, ctx: &mut ToolContext<'_>) -> R
     let mem = ctx.memory.as_deref_mut().ok_or("memory system unavailable")?;
     let query = input["query"].as_str().ok_or("missing 'query' parameter")?;
     let k = input["k"].as_u64().unwrap_or(5) as usize;
-    let hits = mem.recall(query, k);
+    // Use hybrid recall (vector + keyword) for better results.
+    let hits = mem.recall_hybrid(query, k);
     if hits.is_empty() {
         Ok("관련 기억을 찾지 못했습니다.".to_string())
     } else {
@@ -504,6 +538,81 @@ fn exec_memory_store(input: &serde_json::Value, ctx: &mut ToolContext<'_>) -> Re
     match mem.store(text, tags) {
         Ok(id) => Ok(format!("저장 완료 (id: {id})")),
         Err(e) => Err(format!("저장 실패: {e}")),
+    }
+}
+
+async fn exec_ingest_document(
+    input: &serde_json::Value,
+    ctx: &mut ToolContext<'_>,
+) -> Result<String, String> {
+    let mem = ctx.memory.as_deref_mut().ok_or("memory system unavailable")?;
+    let source = input["source"].as_str().ok_or("missing 'source' parameter")?;
+    let chunk_size = input["chunk_size"].as_u64().unwrap_or(500) as usize;
+    let chunk_overlap = input["chunk_overlap"].as_u64().unwrap_or(50) as usize;
+
+    // Get text from either 'text' field or by reading 'file_path'.
+    let text = if let Some(t) = input["text"].as_str() {
+        t.to_string()
+    } else if let Some(path) = input["file_path"].as_str() {
+        let path = Path::new(path);
+        if !path.exists() {
+            return Err(format!("파일을 찾을 수 없습니다: {}", path.display()));
+        }
+
+        // Handle PDF via external script.
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if ext == "pdf" {
+            // Try pdftotext (poppler), fallback to python.
+            let output = Command::new("pdftotext")
+                .args(["-", "-"])
+                .arg(path.to_str().unwrap_or(""))
+                .output()
+                .await;
+
+            match output {
+                Ok(out) if out.status.success() => {
+                    String::from_utf8_lossy(&out.stdout).to_string()
+                }
+                _ => {
+                    // Fallback: python3 with PyPDF2 or pdfplumber.
+                    let py_script = format!(
+                        "import sys\ntry:\n  import pdfplumber\n  with pdfplumber.open('{}') as pdf:\n    for p in pdf.pages:\n      t = p.extract_text()\n      if t: print(t)\nexcept:\n  try:\n    from PyPDF2 import PdfReader\n    r = PdfReader('{}')\n    for p in r.pages: print(p.extract_text() or '')\n  except Exception as e:\n    print(f'Error: {{e}}', file=sys.stderr); sys.exit(1)",
+                        path.display(), path.display()
+                    );
+                    let py_out = Command::new("python3")
+                        .args(["-c", &py_script])
+                        .output()
+                        .await
+                        .map_err(|e| format!("PDF extraction failed: {e}"))?;
+
+                    if !py_out.status.success() {
+                        return Err(format!(
+                            "PDF 텍스트 추출 실패. pdfplumber 또는 PyPDF2를 설치해주세요: {}",
+                            String::from_utf8_lossy(&py_out.stderr)
+                        ));
+                    }
+                    String::from_utf8_lossy(&py_out.stdout).to_string()
+                }
+            }
+        } else {
+            // Plain text / markdown / code files.
+            std::fs::read_to_string(path)
+                .map_err(|e| format!("파일 읽기 실패: {e}"))?
+        }
+    } else {
+        return Err("'text' 또는 'file_path' 중 하나를 제공해야 합니다.".to_string());
+    };
+
+    if text.trim().is_empty() {
+        return Err("문서 내용이 비어있습니다.".to_string());
+    }
+
+    let char_count = text.chars().count();
+    match mem.ingest_document(source, &text, chunk_size, chunk_overlap) {
+        Ok(chunks) => Ok(format!(
+            "문서 저장 완료: {source}\n- 원본 크기: {char_count}자\n- 청크 수: {chunks}개 (크기: {chunk_size}, 겹침: {chunk_overlap})\n이제 memory_recall로 이 문서의 내용을 검색할 수 있어."
+        )),
+        Err(e) => Err(format!("문서 저장 실패: {e}")),
     }
 }
 
@@ -1677,7 +1786,7 @@ mod tests {
     #[test]
     fn builtin_definitions_are_valid() {
         let defs = builtin_tool_definitions();
-        assert_eq!(defs.len(), 19);
+        assert_eq!(defs.len(), 20);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"memory_recall"));
         assert!(names.contains(&"run_command"));

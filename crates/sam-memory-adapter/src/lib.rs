@@ -9,5 +9,5 @@
 
 pub mod adapter;
 
-pub use adapter::{MemoryAdapter, RecallHit};
+pub use adapter::{MemoryAdapter, RecallHit, DocumentChunk, chunk_text};
 pub use memory_actor::{MemorySystemConfig, MemorySystemStats};

@@ -1761,6 +1761,7 @@ dependencies = [
  "chrono",
  "memory-actor",
  "sam-core",
+ "serde",
  "serde_json",
  "tracing",
  "uuid",
