@@ -606,12 +606,33 @@ pub async fn run() -> i32 {
                                 active_agents.remove(&m.sender);
                             }
 
-                            // Handle /agent switch — update active agent.
+                            // Handle /agent switch — update active agent with shared context.
                             if response.starts_with("__AGENT_SWITCH__:") {
                                 if let Some(agent_name) = response.lines().next()
                                     .and_then(|l| l.strip_prefix("__AGENT_SWITCH__:"))
                                 {
                                     let prev = active_agents.get(&m.sender).cloned();
+
+                                    // Generate handoff summary from the outgoing session.
+                                    if let Some(prev_agent) = &prev {
+                                        let prev_key = format!("{}::{}", m.sender, prev_agent);
+                                        let summary = if let Some(prev_session) = sessions.get(&prev_key) {
+                                            prev_session.summarize_for_handoff(router_client.as_ref()).await
+                                        } else {
+                                            String::new()
+                                        };
+
+                                        if !summary.is_empty() {
+                                            let target_key = format!("{}::{}", m.sender, agent_name);
+                                            if let Some(target_session) = sessions.get_mut(&target_key) {
+                                                target_session.set_handoff_context(summary);
+                                            }
+                                            // If target session doesn't exist yet, it will be
+                                            // created on the next message without the summary.
+                                            // This is acceptable for manual /agent switches.
+                                        }
+                                    }
+
                                     active_agents.insert(m.sender.clone(), agent_name.to_string());
                                     info!(
                                         sender = %m.sender,
@@ -719,23 +740,96 @@ pub async fn run() -> i32 {
                         // Cancel ack if reply arrived before timeout.
                         if let Some(t) = ack_task { t.abort(); }
 
-                        // Multi-agent handoff detection.
+                        // Multi-agent handoff detection with shared memory.
                         let reply = if reply.contains("__HANDOFF__:") {
                             if let Some(handoff_line) = reply.lines().find(|l| l.contains("__HANDOFF__:")) {
                                 let parts: Vec<&str> = handoff_line.splitn(3, ':').collect();
                                 if parts.len() >= 2 {
-                                    let target_agent = parts[1];
-                                    let context = parts.get(2).unwrap_or(&"");
-                                    active_agents.insert(m.sender.clone(), target_agent.to_string());
+                                    let target_agent = parts[1].to_string();
+                                    let explicit_context = parts.get(2).unwrap_or(&"").to_string();
+
+                                    // Generate handoff summary from outgoing session.
+                                    let handoff_summary = {
+                                        let outgoing = sessions.get(&session_key);
+                                        if let Some(session) = outgoing {
+                                            session.summarize_for_handoff(router_client.as_ref()).await
+                                        } else {
+                                            String::new()
+                                        }
+                                    };
+
+                                    // Check for transfer memos left by the agent.
+                                    let memo = sam_claude::tools::read_transfer_memo(
+                                        &m.sender, &target_agent,
+                                    );
+
+                                    // Build combined handoff context.
+                                    let mut combined_context = String::new();
+                                    if !handoff_summary.is_empty() {
+                                        combined_context.push_str(&format!(
+                                            "[대화 요약]\n{handoff_summary}\n\n"
+                                        ));
+                                    }
+                                    if let Some(ref memo_text) = memo {
+                                        combined_context.push_str(&format!(
+                                            "[인수인계 메모]\n{memo_text}\n\n"
+                                        ));
+                                    }
+                                    if !explicit_context.is_empty() {
+                                        combined_context.push_str(&format!(
+                                            "[추가 맥락] {explicit_context}"
+                                        ));
+                                    }
+
+                                    // Switch agent.
+                                    active_agents.insert(m.sender.clone(), target_agent.clone());
                                     info!(
                                         sender = %m.sender,
-                                        from_agent = "current",
-                                        to_agent = target_agent,
-                                        "agent handoff"
+                                        to_agent = %target_agent,
+                                        context_len = combined_context.len(),
+                                        "agent handoff with shared memory"
                                     );
+
+                                    // Inject handoff context into the target session
+                                    // (will be created on next message if not exists).
+                                    let target_key = format!("{}::{}", m.sender, target_agent);
+                                    if let Some(target_session) = sessions.get_mut(&target_key) {
+                                        target_session.set_handoff_context(combined_context.clone());
+                                    } else {
+                                        // Pre-create the target session with handoff context.
+                                        let (prompt, filter) = {
+                                            let store = router_agent_store.lock().await;
+                                            if let Some(agent_def) = store.get(&target_agent) {
+                                                (agent_def.load_prompt(), Some(agent_def.tools.clone()))
+                                            } else {
+                                                (system_prompt.clone(), None)
+                                            }
+                                        };
+                                        let mut s = if let Some(ref f) = filter {
+                                            ConversationSession::new_with_filter(
+                                                &target_key, prompt, max_history, f,
+                                            )
+                                        } else {
+                                            ConversationSession::new(
+                                                &target_key, prompt, max_history,
+                                            )
+                                        };
+                                        if !router_mcp_tool_defs.is_empty() {
+                                            s.add_tools(router_mcp_tool_defs.clone());
+                                        }
+                                        if !router_skill_tool_defs.is_empty() {
+                                            s.add_tools(router_skill_tool_defs.clone());
+                                        }
+                                        if !router_plugin_tool_defs.is_empty() {
+                                            s.add_tools(router_plugin_tool_defs.clone());
+                                        }
+                                        s.set_handoff_context(combined_context.clone());
+                                        sessions.insert(target_key, s);
+                                    }
+
                                     format!("🔀 {} 에이전트로 전환합니다.{}", target_agent,
-                                        if context.is_empty() { String::new() }
-                                        else { format!("\n(맥락: {context})") }
+                                        if explicit_context.is_empty() { String::new() }
+                                        else { format!("\n(맥락: {explicit_context})") }
                                     )
                                 } else {
                                     reply

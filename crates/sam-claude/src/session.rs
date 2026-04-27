@@ -31,6 +31,9 @@ pub struct ConversationSession {
     tools: Vec<ToolDefinition>,
     /// Rolling summary of dropped conversation history (context compaction).
     context_summary: Option<String>,
+    /// Handoff context from a previous agent — injected into system prompt
+    /// so the receiving agent has full context of the prior conversation.
+    handoff_context: Option<String>,
 }
 
 /// Serializable snapshot of session state for persistence.
@@ -50,6 +53,7 @@ impl ConversationSession {
             system_prompt,
             tools: builtin_tool_definitions(),
             context_summary: None,
+            handoff_context: None,
         }
     }
 
@@ -72,6 +76,7 @@ impl ConversationSession {
             system_prompt,
             tools,
             context_summary: None,
+            handoff_context: None,
         }
     }
 
@@ -91,6 +96,7 @@ impl ConversationSession {
                             system_prompt,
                             tools: builtin_tool_definitions(),
                             context_summary: snap.context_summary,
+                            handoff_context: None,
                         };
                     }
                     Err(e) => {
@@ -301,14 +307,115 @@ impl ConversationSession {
         Ok("도구 호출 한도에 도달했어. 다시 시도해줘.".to_string())
     }
 
-    /// Build effective system prompt including context summary.
+    /// Build effective system prompt including context summary and handoff context.
     fn effective_system_prompt(&self) -> String {
-        match &self.context_summary {
-            Some(summary) => format!(
-                "{}\n\n[이전 대화 요약]\n{}",
-                self.system_prompt, summary
-            ),
-            None => self.system_prompt.clone(),
+        let mut prompt = self.system_prompt.clone();
+
+        if let Some(ref handoff) = self.handoff_context {
+            prompt.push_str(&format!(
+                "\n\n[이전 에이전트에서 인수인계 받은 맥락]\n{}",
+                handoff
+            ));
+        }
+
+        if let Some(ref summary) = self.context_summary {
+            prompt.push_str(&format!(
+                "\n\n[이전 대화 요약]\n{}",
+                summary
+            ));
+        }
+
+        prompt
+    }
+
+    /// Set handoff context from a previous agent's conversation.
+    /// This is injected into the system prompt so the receiving agent
+    /// has full awareness of prior context.
+    pub fn set_handoff_context(&mut self, context: String) {
+        self.handoff_context = Some(context);
+    }
+
+    /// Summarize this session's conversation for handoff to another agent.
+    /// Returns a concise summary suitable for injection into the receiving
+    /// agent's system prompt.
+    pub async fn summarize_for_handoff(
+        &self,
+        client: &dyn LlmClient,
+    ) -> String {
+        // Collect recent conversation text (up to last 20 messages).
+        let recent: Vec<&ChatMessage> = self.history.iter().rev().take(20).collect();
+        let mut text = String::new();
+
+        // Include existing context summary if available.
+        if let Some(ref summary) = self.context_summary {
+            text.push_str(&format!("[이전 요약] {summary}\n\n"));
+        }
+
+        for msg in recent.iter().rev() {
+            let role = &msg.role;
+            let content = match &msg.content {
+                MessageContent::Text(s) => s.clone(),
+                MessageContent::Blocks(blocks) => {
+                    blocks
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                }
+            };
+            if !content.is_empty() {
+                text.push_str(&format!("[{role}] {content}\n"));
+            }
+        }
+
+        if text.is_empty() {
+            return String::new();
+        }
+
+        // Ask Claude to produce a handoff-optimized summary.
+        let summarize_prompt = concat!(
+            "다음은 이전 에이전트와 사용자 간의 대화이다. ",
+            "새로운 에이전트가 이어받을 수 있도록 핵심 맥락을 정리해줘:\n",
+            "1. 사용자가 원래 요청한 것\n",
+            "2. 지금까지 완료된 것\n",
+            "3. 아직 남은 작업\n",
+            "4. 중요한 결정사항이나 제약조건\n\n",
+            "5-8문장으로 간결하게. 요약만 출력해."
+        );
+
+        let messages = vec![
+            ChatMessage::text("user", &format!("{summarize_prompt}\n\n---\n{text}")),
+        ];
+
+        match client
+            .chat(
+                "You are a concise summarizer for agent handoffs.",
+                &messages,
+                None,
+            )
+            .await
+        {
+            Ok(resp) => {
+                let summary = resp.text.trim().to_string();
+                info!(handle = %self.handle, len = summary.len(), "handoff summary generated");
+                summary
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to generate handoff summary, using fallback");
+                // Fallback: use the last few user messages as context.
+                let mut fallback = String::new();
+                for msg in self.history.iter().rev().take(5).rev() {
+                    if msg.role == "user" {
+                        if let MessageContent::Text(t) = &msg.content {
+                            fallback.push_str(&format!("- {t}\n"));
+                        }
+                    }
+                }
+                fallback
+            }
         }
     }
 

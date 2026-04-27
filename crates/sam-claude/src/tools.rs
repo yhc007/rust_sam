@@ -335,6 +335,29 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "transfer_memo".to_string(),
+            description: "다른 에이전트에게 인수인계 메모를 남긴다. handoff 전에 호출하면 받는 에이전트가 맥락을 이어받는다.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "target_agent": {
+                        "type": "string",
+                        "description": "메모를 받을 에이전트 이름"
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "지금까지의 대화 맥락과 남은 작업 요약"
+                    },
+                    "key_facts": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "핵심 사실/결정사항 목록"
+                    }
+                },
+                "required": ["target_agent", "summary"]
+            }),
+        },
+        ToolDefinition {
             name: "browser".to_string(),
             description: "웹 브라우저를 제어한다. 페이지 방문, 내용 추출, 스크린샷 가능.".to_string(),
             input_schema: json!({
@@ -474,6 +497,7 @@ pub async fn execute_builtin_no_flow(
         "cancel_reminder" => exec_cancel_reminder(input, ctx).await,
         "notion_create_page" => exec_notion_create_page(input, ctx).await,
         "handoff_to_agent" => exec_handoff(input),
+        "transfer_memo" => exec_transfer_memo(input, ctx),
         "browser" => exec_browser(input, ctx).await,
         "generate_image" => exec_generate_image(input, ctx).await,
         "generate_chart" => exec_generate_chart(input, ctx).await,
@@ -1388,6 +1412,94 @@ fn exec_handoff(input: &serde_json::Value) -> Result<String, String> {
     Ok(format!("__HANDOFF__:{}:{}", agent, context))
 }
 
+// ── Transfer memo ─────────────────────────────────────────────────────────
+
+/// Write a structured memo for agent handoff.
+/// Stored as `~/.sam/state/memos/<sender>::<target>.json`.
+fn exec_transfer_memo(input: &serde_json::Value, ctx: &ToolContext) -> Result<String, String> {
+    let target = input["target_agent"]
+        .as_str()
+        .ok_or("missing 'target_agent'")?;
+    let summary = input["summary"]
+        .as_str()
+        .ok_or("missing 'summary'")?;
+    let key_facts: Vec<String> = input["key_facts"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let memo = serde_json::json!({
+        "from_handle": ctx.sender_handle,
+        "target_agent": target,
+        "summary": summary,
+        "key_facts": key_facts,
+        "timestamp": chrono::Local::now().to_rfc3339(),
+    });
+
+    // Save to ~/.sam/state/memos/
+    let memos_dir = sam_core::state_dir().join("memos");
+    if let Err(e) = std::fs::create_dir_all(&memos_dir) {
+        return Err(format!("failed to create memos directory: {e}"));
+    }
+
+    // Key: sanitize sender handle for filename.
+    let sanitized_handle: String = ctx
+        .sender_handle
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let filename = format!("{sanitized_handle}__{target}.json");
+    let path = memos_dir.join(&filename);
+
+    std::fs::write(&path, serde_json::to_string_pretty(&memo).unwrap_or_default())
+        .map_err(|e| format!("failed to write memo: {e}"))?;
+
+    Ok(format!("메모 저장 완료. {target} 에이전트가 인수인계 시 이 맥락을 받게 됩니다."))
+}
+
+/// Read a transfer memo left for a specific agent.
+/// Returns None if no memo exists.
+pub fn read_transfer_memo(sender_handle: &str, agent_name: &str) -> Option<String> {
+    let memos_dir = sam_core::state_dir().join("memos");
+    let sanitized_handle: String = sender_handle
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let filename = format!("{sanitized_handle}__{agent_name}.json");
+    let path = memos_dir.join(&filename);
+
+    match std::fs::read_to_string(&path) {
+        Ok(data) => {
+            // Delete after reading (one-time delivery).
+            let _ = std::fs::remove_file(&path);
+            if let Ok(memo) = serde_json::from_str::<serde_json::Value>(&data) {
+                let mut result = String::new();
+                if let Some(summary) = memo["summary"].as_str() {
+                    result.push_str(summary);
+                }
+                if let Some(facts) = memo["key_facts"].as_array() {
+                    if !facts.is_empty() {
+                        result.push_str("\n\n핵심 사항:");
+                        for fact in facts {
+                            if let Some(f) = fact.as_str() {
+                                result.push_str(&format!("\n- {f}"));
+                            }
+                        }
+                    }
+                }
+                if result.is_empty() { None } else { Some(result) }
+            } else {
+                Some(data)
+            }
+        }
+        Err(_) => None,
+    }
+}
+
 // ── Browser automation ────────────────────────────────────────────────────
 
 async fn exec_browser(
@@ -1786,7 +1898,7 @@ mod tests {
     #[test]
     fn builtin_definitions_are_valid() {
         let defs = builtin_tool_definitions();
-        assert_eq!(defs.len(), 20);
+        assert_eq!(defs.len(), 21);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"memory_recall"));
         assert!(names.contains(&"run_command"));

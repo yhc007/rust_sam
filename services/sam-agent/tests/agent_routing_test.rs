@@ -175,3 +175,44 @@ fn parse_classify_response_handles_edge_cases() {
     // Empty → default.
     assert_eq!(store.parse_classify_response("", "default"), "default");
 }
+
+#[test]
+fn transfer_memo_write_and_read() {
+    use sam_claude::tools::read_transfer_memo;
+
+    // Write a memo via JSON file directly (simulates exec_transfer_memo).
+    let memos_dir = sam_core::state_dir().join("memos");
+    std::fs::create_dir_all(&memos_dir).unwrap();
+
+    let memo = serde_json::json!({
+        "from_handle": "+821012345678",
+        "target_agent": "coder",
+        "summary": "사용자가 로그인 버그 수정을 요청함. OAuth 토큰 만료 문제로 파악됨.",
+        "key_facts": ["OAuth 토큰 TTL 1시간", "리프레시 토큰 미구현"],
+        "timestamp": "2026-04-28T10:00:00+09:00",
+    });
+
+    let path = memos_dir.join("_821012345678__coder.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&memo).unwrap()).unwrap();
+
+    // Read should return the memo content and delete the file.
+    let result = read_transfer_memo("+821012345678", "coder");
+    assert!(result.is_some());
+    let text = result.unwrap();
+    assert!(text.contains("OAuth"));
+    assert!(text.contains("리프레시 토큰 미구현"));
+
+    // File should be deleted after read (one-time delivery).
+    assert!(!path.exists());
+
+    // Second read should return None.
+    let result2 = read_transfer_memo("+821012345678", "coder");
+    assert!(result2.is_none());
+}
+
+#[test]
+fn transfer_memo_missing_returns_none() {
+    use sam_claude::tools::read_transfer_memo;
+    let result = read_transfer_memo("+820000000000", "nonexistent_agent");
+    assert!(result.is_none());
+}
