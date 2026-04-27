@@ -214,7 +214,26 @@ impl ConversationSession {
         }
 
         // Build effective system prompt (base + context summary).
-        let effective_system = self.effective_system_prompt();
+        let mut effective_system = self.effective_system_prompt();
+
+        // Move memory into mut binding early so we can use it for auto-recall.
+        let mut mem_opt = memory;
+
+        // Auto-recall: always search memory before LLM call and inject relevant context.
+        if let Some(ref mut mem) = mem_opt {
+            let recall_context = mem.recall_context(user_text, 5);
+            if !recall_context.is_empty() {
+                info!(
+                    query = user_text,
+                    hits_len = recall_context.len(),
+                    "auto-recall injected memory context"
+                );
+                effective_system.push_str(&format!(
+                    "\n\n[관련 기억]\n{}",
+                    recall_context
+                ));
+            }
+        }
 
         // Limit tools sent to the API to avoid overwhelming smaller models.
         // All tools remain executable — only the API request is trimmed.
@@ -249,8 +268,6 @@ impl ConversationSession {
         );
         let mut total_input = 0u32;
         let mut total_output = 0u32;
-
-        let mut mem_opt = memory;
 
         for round in 0..MAX_TOOL_ROUNDS {
             let resp = match client
