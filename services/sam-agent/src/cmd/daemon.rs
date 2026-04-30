@@ -121,25 +121,13 @@ pub async fn run() -> i32 {
     };
 
     // Build optional fallback LLM client.
-    let fallback_client: Option<Arc<dyn LlmBackend>> = config.llm.fallback_config().and_then(|fb_cfg| {
-        let fb_key = match load_api_key(&fb_cfg) {
-            Ok(k) => k,
-            Err(e) => {
-                warn!("Fallback API key error, disabling fallback: {e}");
-                return None;
-            }
-        };
-        let built: Option<Arc<dyn LlmBackend>> = match fb_cfg.provider.as_str() {
-            "xai" => XaiClient::new(fb_key, &fb_cfg).ok().map(|c| Arc::new(c) as Arc<dyn LlmBackend>),
-            "openai-compatible" => OpenAiCompatibleClient::new(fb_key, &fb_cfg).ok().map(|c| Arc::new(c) as Arc<dyn LlmBackend>),
-            _ => SamClaudeClient::new(fb_key, &fb_cfg).ok().map(|c| Arc::new(c) as Arc<dyn LlmBackend>),
-        };
-        if built.is_some() {
-            info!(provider = %fb_cfg.provider, model = %fb_cfg.model, "Fallback LLM client ready");
-        } else {
-            warn!("Failed to build fallback LLM client");
-        }
-        built
+    let fallback_client: Option<Arc<dyn LlmBackend>> = config.llm.fallback_config().and_then(|cfg| {
+        build_optional_client(&cfg, "Fallback")
+    });
+
+    // Build optional fast/cheap LLM client for simple messages.
+    let fast_client: Option<Arc<dyn LlmBackend>> = config.llm.fast_config().and_then(|cfg| {
+        build_optional_client(&cfg, "Fast")
     });
 
     let system_prompt = load_system_prompt();
@@ -355,6 +343,7 @@ pub async fn run() -> i32 {
     let router_cancel = cancel.clone();
     let router_client = Arc::clone(&client);
     let router_fallback = fallback_client.clone();
+    let router_fast = fast_client.clone();
     let router_config = config.clone();
     let router_dq = Arc::clone(&delivery_queue);
     let router_flow_store = Arc::clone(&flow_store);
@@ -755,14 +744,21 @@ pub async fn run() -> i32 {
                             continue;
                         }
 
-                        tracing::debug!(
+                        // Route: simple chat → fast model, tool-likely → primary.
+                        let use_fast = router_fast.is_some() && should_use_fast(&user_text);
+                        let chosen_client: &dyn LlmBackend = if use_fast {
+                            router_fast.as_deref().unwrap_or(router_client.as_ref())
+                        } else {
+                            router_client.as_ref()
+                        };
+                        info!(
                             handle = %m.sender,
+                            fast = use_fast,
                             tools = session.tool_count(),
-                            history = session.history().len(),
                             "dispatching to LLM"
                         );
                         let reply = match session.reply(
-                            router_client.as_ref(),
+                            chosen_client,
                             &mut budget,
                             &user_text,
                             &images,
@@ -1332,6 +1328,81 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
     parts
 }
 
+// ── Message routing ────────────────────────────────────────────────────
+
+/// Tool-trigger keywords that indicate the message needs the primary (smart) model.
+const TOOL_KEYWORDS: &[&str] = &[
+    // Time/weather/search
+    "몇 시", "몇시", "날씨", "검색", "찾아", "뉴스", "주가", "환율",
+    // Memory
+    "기억", "저번에", "지난번", "지난주", "어제", "잊지",
+    // Reminders
+    "리마인더", "알림", "알려줘", "예약",
+    // Files/commands/code
+    "파일", "코드", "명령", "실행", "빌드", "배포", "커밋",
+    "코딩", "디버그", "에러", "수정", "고쳐",
+    // Notion/tools
+    "노션", "notion", "차트", "그래프", "이미지",
+    // Web
+    "url", "http", "링크", "사이트", "페이지",
+    // Explicit requests
+    "해줘", "해 줘", "알아봐", "확인해", "분석",
+    // English tool triggers
+    "search", "remind", "weather", "code", "file", "run",
+];
+
+/// Decide whether a message is simple enough for the fast (cheap) model.
+/// Returns true for casual conversation, false for tool-likely messages.
+fn should_use_fast(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+
+    // Short casual messages (greetings, reactions) → fast
+    let char_count = msg.chars().count();
+    if char_count <= 5 {
+        // Even short messages with tool keywords go to primary
+        return !TOOL_KEYWORDS.iter().any(|kw| lower.contains(kw));
+    }
+
+    // Question marks often imply information lookup → primary
+    if msg.contains('?') || msg.contains('？') {
+        return false;
+    }
+
+    // Check for tool-trigger keywords
+    if TOOL_KEYWORDS.iter().any(|kw| lower.contains(kw)) {
+        return false;
+    }
+
+    // Long messages (100+ chars) likely need deeper reasoning → primary
+    if char_count > 100 {
+        return false;
+    }
+
+    true
+}
+
+/// Build an optional LLM client from config, logging success/failure.
+fn build_optional_client(cfg: &sam_core::LlmConfig, label: &str) -> Option<Arc<dyn LlmBackend>> {
+    let key = match load_api_key(cfg) {
+        Ok(k) => k,
+        Err(e) => {
+            warn!("{label} API key error, disabling: {e}");
+            return None;
+        }
+    };
+    let built: Option<Arc<dyn LlmBackend>> = match cfg.provider.as_str() {
+        "xai" => XaiClient::new(key, cfg).ok().map(|c| Arc::new(c) as _),
+        "openai-compatible" => OpenAiCompatibleClient::new(key, cfg).ok().map(|c| Arc::new(c) as _),
+        _ => SamClaudeClient::new(key, cfg).ok().map(|c| Arc::new(c) as _),
+    };
+    if built.is_some() {
+        info!(provider = %cfg.provider, model = %cfg.model, "{label} LLM client ready");
+    } else {
+        warn!("Failed to build {label} LLM client");
+    }
+    built
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1350,6 +1421,25 @@ mod tests {
         for part in &parts {
             assert!(part.len() <= 500);
         }
+    }
+
+    #[test]
+    fn route_simple_messages_to_fast() {
+        assert!(should_use_fast("안녕"));
+        assert!(should_use_fast("ㅋㅋ"));
+        assert!(should_use_fast("고마워"));
+        assert!(should_use_fast("오늘 기분이 좋아"));
+    }
+
+    #[test]
+    fn route_complex_messages_to_primary() {
+        assert!(!should_use_fast("날씨 어때?"));
+        assert!(!should_use_fast("지금 몇 시야?"));
+        assert!(!should_use_fast("이거 기억해: API 키는 abc123"));
+        assert!(!should_use_fast("코드 좀 고쳐줘"));
+        assert!(!should_use_fast("리마인더 걸어줘"));
+        assert!(!should_use_fast("검색해봐"));
+        assert!(!should_use_fast("노션에 정리해줘"));
     }
 
     #[test]

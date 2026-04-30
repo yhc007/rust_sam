@@ -632,22 +632,14 @@ impl ConversationSession {
                             ContentBlock::ToolUse { name, input, .. } => {
                                 // Include tool calls with abbreviated input.
                                 let input_str = input.to_string();
-                                let abbreviated = if input_str.len() > 100 {
-                                    format!("{}...", &input_str[..100])
-                                } else {
-                                    input_str
-                                };
+                                let abbreviated = truncate_chars(&input_str, 100);
                                 text.push_str(&format!("[tool:{name}] {abbreviated}\n"));
                             }
                             ContentBlock::ToolResult {
                                 content, is_error, ..
                             } => {
                                 let prefix = if *is_error { "error" } else { "result" };
-                                let abbreviated = if content.len() > 150 {
-                                    format!("{}...", &content[..150])
-                                } else {
-                                    content.clone()
-                                };
+                                let abbreviated = truncate_chars(content, 150);
                                 text.push_str(&format!("[{prefix}] {abbreviated}\n"));
                             }
                             _ => {}
@@ -791,6 +783,18 @@ impl ConversationSession {
     pub fn set_compaction_limits(&mut self, max_context_tokens: usize, max_summary_chars: usize) {
         self.max_context_tokens = max_context_tokens;
         self.max_summary_chars = max_summary_chars;
+    }
+}
+
+/// Truncate a string to at most `max_chars` characters, appending "..." if truncated.
+/// Safe for multi-byte characters (Korean, etc.).
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_chars).collect();
+        format!("{truncated}...")
     }
 }
 

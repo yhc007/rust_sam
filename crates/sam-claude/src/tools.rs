@@ -102,7 +102,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "memory_store".to_string(),
-            description: "중요한 정보를 장기 기억에 저장한다. 사용자가 '기억해' 또는 중요한 사실을 알려줄 때 사용.".to_string(),
+            description: "중요한 정보를 장기 기억에 저장한다. 사용자가 '기억해' 또는 중요한 사실을 알려줄 때 사용. importance로 중요도를 판단하여 지정한다.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -114,6 +114,12 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "분류 태그 (선택)"
+                    },
+                    "importance": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                        "description": "기억 중요도 (0.0~1.0). 1.0=개인정보/키/비밀번호/생일, 0.7~0.9=약속/프로젝트 결정, 0.4~0.6=유용한 정보, 0.1~0.3=일상 대화/임시 메모. 생략 시 0.5"
                     }
                 },
                 "required": ["text"]
@@ -591,8 +597,14 @@ fn exec_memory_store(input: &serde_json::Value, ctx: &mut ToolContext<'_>) -> Re
         .as_array()
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
-    match mem.store(text, tags) {
-        Ok(id) => Ok(format!("저장 완료 (id: {id})")),
+    let importance = input["importance"].as_f64().map(|v| v as f32);
+    match mem.store_with_strength(text, tags, importance) {
+        Ok(id) => {
+            let strength_info = importance
+                .map(|s| format!(", 중요도: {s:.1}"))
+                .unwrap_or_default();
+            Ok(format!("저장 완료 (id: {id}{strength_info})"))
+        }
         Err(e) => Err(format!("저장 실패: {e}")),
     }
 }

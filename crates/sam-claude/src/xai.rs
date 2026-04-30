@@ -24,6 +24,7 @@ pub struct XaiClient {
 impl XaiClient {
     pub fn new(api_key: String, config: &sam_core::LlmConfig) -> anyhow::Result<Self> {
         let client = Client::builder()
+            .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(config.timeout_secs))
             .build()
             .map_err(|e| anyhow::anyhow!("failed to build HTTP client: {e}"))?;

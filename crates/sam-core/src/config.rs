@@ -133,6 +133,10 @@ pub struct LlmConfig {
     /// returns errors (503, network issues, etc.).
     #[serde(default)]
     pub fallback: Option<LlmFallbackConfig>,
+    /// Optional fast/cheap LLM for simple conversations.
+    /// Used by the message router to save costs on trivial messages.
+    #[serde(default)]
+    pub fast: Option<LlmFallbackConfig>,
 }
 
 /// Minimal config for fallback LLM — fields not specified inherit from primary.
@@ -152,7 +156,7 @@ impl LlmConfig {
     fn default_max_tokens() -> u32 { 4096 }
     fn default_budget() -> u64 { 1_000_000 }
     fn default_base_url() -> String { "https://api.anthropic.com".to_string() }
-    fn default_timeout() -> u64 { 60 }
+    fn default_timeout() -> u64 { 30 }
     fn default_retries() -> u32 { 3 }
     fn default_temperature() -> f32 { 0.7 }
     fn default_history() -> usize { 20 }
@@ -170,6 +174,22 @@ impl LlmConfig {
             base_url: fb.base_url.clone().unwrap_or_else(|| self.base_url.clone()),
             api_key_source: fb.api_key_source.clone().or_else(|| self.api_key_source.clone()),
             fallback: None,
+            fast: None,
+            ..self.clone()
+        })
+    }
+
+    /// Build an LlmConfig for the fast/cheap model by merging overrides
+    /// with the primary config.
+    pub fn fast_config(&self) -> Option<LlmConfig> {
+        let f = self.fast.as_ref()?;
+        Some(LlmConfig {
+            provider: f.provider.clone(),
+            model: f.model.clone(),
+            base_url: f.base_url.clone().unwrap_or_else(|| self.base_url.clone()),
+            api_key_source: f.api_key_source.clone().or_else(|| self.api_key_source.clone()),
+            fallback: None,
+            fast: None,
             ..self.clone()
         })
     }
@@ -192,6 +212,7 @@ impl Default for LlmConfig {
             max_summary_chars: Self::default_max_summary_chars(),
             ack_delay_secs: Self::default_ack_delay(),
             fallback: None,
+            fast: None,
         }
     }
 }

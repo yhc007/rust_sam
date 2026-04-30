@@ -87,13 +87,24 @@ impl MemoryAdapter {
     /// Store a new memory. Returns the assigned id.
     /// Automatically persists to disk.
     pub fn store(&mut self, text: impl Into<String>, tags: Vec<String>) -> Result<Uuid> {
+        self.store_with_strength(text, tags, None)
+    }
+
+    /// Store a new memory with explicit importance (strength 0.0–1.0).
+    /// Automatically persists to disk.
+    pub fn store_with_strength(
+        &mut self,
+        text: impl Into<String>,
+        tags: Vec<String>,
+        strength: Option<f32>,
+    ) -> Result<Uuid> {
         let ctx = MemoryContext {
             source: "sam".to_string(),
             timestamp: chrono::Utc::now(),
             tags,
             metadata: None,
         };
-        let id = self.guardian.store(text.into(), ctx);
+        let id = self.guardian.store_with_strength(text.into(), ctx, strength);
         self.save_to_disk();
         Ok(id)
     }
