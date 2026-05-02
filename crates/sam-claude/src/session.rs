@@ -268,6 +268,9 @@ impl ConversationSession {
         );
         let mut total_input = 0u32;
         let mut total_output = 0u32;
+        // Track how many times each tool has been called to prevent loops.
+        let mut tool_call_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        const MAX_SAME_TOOL_CALLS: u32 = 2;
 
         for round in 0..MAX_TOOL_ROUNDS {
             let resp = match client
@@ -318,6 +321,24 @@ impl ConversationSession {
 
                 // Execute each tool and build tool_result messages.
                 for tc in &resp.tool_calls {
+                    let count = tool_call_counts.entry(tc.name.clone()).or_insert(0);
+                    *count += 1;
+
+                    // Block repeated calls to the same tool (prevents loops).
+                    if *count > MAX_SAME_TOOL_CALLS {
+                        warn!(
+                            tool = %tc.name,
+                            count = *count,
+                            "blocking repeated tool call"
+                        );
+                        self.history.push(ChatMessage::tool_result(
+                            &tc.id,
+                            &format!("이 도구({})는 이미 {}회 호출되었다. 더 이상 호출하지 말고 지금까지 결과를 사용자에게 전달해라.", tc.name, *count - 1),
+                            true,
+                        ));
+                        continue;
+                    }
+
                     let mut ctx = ToolContext {
                         memory: mem_opt.as_deref_mut(),
                         config,
@@ -336,6 +357,7 @@ impl ConversationSession {
                     info!(
                         tool = %tc.name,
                         is_error = is_error,
+                        count = *count,
                         "tool result"
                     );
                     self.history
