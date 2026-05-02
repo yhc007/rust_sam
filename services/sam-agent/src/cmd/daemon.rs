@@ -27,6 +27,10 @@ use sam_imessage::types::{IncomingMessage, OutgoingMessage};
 /// Maximum length of a single iMessage before splitting.
 const MSG_SPLIT_LEN: usize = 500;
 
+/// Threshold (in chars) above which a reply is sent as an attached .md file
+/// with a short summary text, instead of multiple split messages.
+const LONG_REPLY_THRESHOLD: usize = 1500;
+
 /// Shared runtime stats written to ~/.sam/state/daemon_stats.json periodically.
 #[derive(Debug, Clone, Serialize)]
 pub struct DaemonStats {
@@ -554,12 +558,18 @@ pub async fn run() -> i32 {
 
                         let session = sessions.get_mut(&session_key).unwrap();
 
-                        // Register "..." ack text in sent_texts so echo
-                        // detection can catch it when it bounces back.
-                        sent_texts.insert(normalize_for_dedup("..."), std::time::Instant::now());
+                        // Send immediate "👍" ack so the user knows
+                        // Sam received the message (before LLM processes).
+                        sent_texts.insert(normalize_for_dedup("👍"), std::time::Instant::now());
+                        let _ = outbound_tx.send(OutgoingMessage {
+                            handle: m.sender.clone(),
+                            body: "👍".to_string(),
+                            attachment: None,
+                        }).await;
 
-                        // Spawn ack timer — sends "..." if reply takes too long.
+                        // Spawn "..." typing indicator if reply takes too long.
                         let ack_delay = router_config.llm.ack_delay_secs;
+                        sent_texts.insert(normalize_for_dedup("..."), std::time::Instant::now());
                         let ack_task = if ack_delay > 0 {
                             let ack_tx = outbound_tx.clone();
                             let ack_handle = m.sender.clone();
@@ -954,12 +964,13 @@ pub async fn run() -> i32 {
                         };
 
                         // Attachment detection: extract __ATTACHMENT__:/path lines.
-                        let mut attachment_path: Option<String> = None;
+                        // Supports multiple attachments per reply.
+                        let mut attachment_paths: Vec<String> = Vec::new();
                         let reply = if reply.contains("__ATTACHMENT__:") {
                             let mut clean_lines = Vec::new();
                             for line in reply.lines() {
                                 if let Some(path) = line.strip_prefix("__ATTACHMENT__:") {
-                                    attachment_path = Some(path.to_string());
+                                    attachment_paths.push(path.to_string());
                                 } else {
                                     clean_lines.push(line);
                                 }
@@ -973,12 +984,12 @@ pub async fn run() -> i32 {
                             sender = %m.sender,
                             rowid = m.rowid,
                             reply_len = reply.len(),
-                            attachment = ?attachment_path,
+                            attachments = attachment_paths.len(),
                             "reply ready"
                         );
 
-                        // If we have an attachment, send it first.
-                        if let Some(ref att_path) = attachment_path {
+                        // Send all attachments.
+                        for att_path in &attachment_paths {
                             let att_msg = OutgoingMessage {
                                 handle: m.sender.clone(),
                                 body: String::new(),
@@ -988,6 +999,34 @@ pub async fn run() -> i32 {
                                 return;
                             }
                             router_stats.messages_sent.fetch_add(1, Relaxed);
+                        }
+
+                        // If the reply is very long, save as .md and send as attachment
+                        // with a short summary, instead of splitting into many messages.
+                        if reply.chars().count() > LONG_REPLY_THRESHOLD && attachment_paths.is_empty() {
+                            let md_dir = sam_core::state_dir().join("replies");
+                            let _ = fs::create_dir_all(&md_dir);
+                            let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+                            let md_path = md_dir.join(format!("reply_{ts}.md"));
+                            if let Err(e) = fs::write(&md_path, &reply) {
+                                warn!(error = %e, "failed to write .md reply");
+                            } else {
+                                // Send the .md file as attachment with a short summary.
+                                let summary: String = reply.chars().take(200).collect();
+                                let summary = format!("{summary}…\n\n(전체 내용은 첨부 파일 참조)");
+                                sent_texts.insert(normalize_for_dedup(&summary), std::time::Instant::now());
+                                let att_msg = OutgoingMessage {
+                                    handle: m.sender.clone(),
+                                    body: summary,
+                                    attachment: Some(md_path.to_string_lossy().to_string()),
+                                };
+                                if outbound_tx.send(att_msg).await.is_err() {
+                                    return;
+                                }
+                                router_stats.messages_sent.fetch_add(1, Relaxed);
+                                last_reply_time.insert(m.sender.clone(), std::time::Instant::now());
+                                continue;
+                            }
                         }
 
                         // Split long messages for readability.
@@ -1008,7 +1047,7 @@ pub async fn run() -> i32 {
                             let out = OutgoingMessage {
                                 handle: m.sender.clone(),
                                 body: part,
-                    attachment: None,
+                                attachment: None,
                             };
                             if outbound_tx.send(out).await.is_err() {
                                 return;
@@ -1018,6 +1057,18 @@ pub async fn run() -> i32 {
                             dq.ack(&queue_id);
                         }
                         router_stats.messages_sent.fetch_add(1, Relaxed);
+
+                        // Send URLs as separate messages for link preview.
+                        let urls = extract_urls(&reply);
+                        for url in &urls {
+                            sent_texts.insert(normalize_for_dedup(url), std::time::Instant::now());
+                            let _ = outbound_tx.send(OutgoingMessage {
+                                handle: m.sender.clone(),
+                                body: url.clone(),
+                                attachment: None,
+                            }).await;
+                        }
+
                         // Record when we last sent a reply to this handle.
                         last_reply_time.insert(m.sender.clone(), std::time::Instant::now());
                     }
@@ -1299,6 +1350,20 @@ fn normalize_for_dedup(text: &str) -> String {
 /// line-break boundaries. Returns the original text as a single-element vec
 /// if it's short enough. Operates on char boundaries to avoid panics on
 /// multibyte UTF-8 (Korean, emoji, etc.).
+/// Extract URLs from text. Returns unique URLs in order of appearance.
+fn extract_urls(text: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for word in text.split_whitespace() {
+        // Also handle URLs wrapped in parentheses or followed by punctuation.
+        let trimmed = word.trim_matches(|c: char| c == '(' || c == ')' || c == ',' || c == '。');
+        if (trimmed.starts_with("http://") || trimmed.starts_with("https://")) && seen.insert(trimmed.to_string()) {
+            urls.push(trimmed.to_string());
+        }
+    }
+    urls
+}
+
 fn split_message(text: &str, max_len: usize) -> Vec<String> {
     let char_count = text.chars().count();
     if char_count <= max_len {
