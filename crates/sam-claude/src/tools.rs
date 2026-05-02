@@ -1884,7 +1884,7 @@ async fn execute_custom_skill(
 
     let result = tokio::time::timeout(Duration::from_secs(timeout), cmd.output()).await;
 
-    match result {
+    let mut out = match result {
         Ok(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1902,7 +1902,15 @@ async fn execute_custom_skill(
         }
         Ok(Err(e)) => Err(format!("skill command execution failed: {e}")),
         Err(_) => Err(format!("skill timeout: {timeout}s exceeded")),
+    };
+    // If the result contains an attachment marker, add a note to
+    // prevent the LLM from calling additional tools to "send" it.
+    if let Ok(ref mut text) = out {
+        if text.contains("__ATTACHMENT__:") {
+            text.push_str("\n(파일이 자동으로 사용자에게 첨부 전송된다. 추가 도구 호출 불필요.)");
+        }
     }
+    out
 }
 
 // ── Image generation (DALL-E API) ─────────────────────────────────────

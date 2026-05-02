@@ -558,12 +558,12 @@ pub async fn run() -> i32 {
 
                         let session = sessions.get_mut(&session_key).unwrap();
 
-                        // Send immediate "👍" ack so the user knows
-                        // Sam received the message (before LLM processes).
-                        sent_texts.insert(normalize_for_dedup("👍"), std::time::Instant::now());
+                        // Send immediate ack so the user knows Sam received
+                        // the message. Use text + emoji to avoid giant sticker.
+                        sent_texts.insert(normalize_for_dedup("확인 👍"), std::time::Instant::now());
                         let _ = outbound_tx.send(OutgoingMessage {
                             handle: m.sender.clone(),
-                            body: "👍".to_string(),
+                            body: "확인 👍".to_string(),
                             attachment: None,
                         }).await;
 
