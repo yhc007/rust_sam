@@ -485,10 +485,12 @@ pub async fn run() -> i32 {
                                 if let Some(agent_def) = store.get(agent_name) {
                                     (agent_def.load_prompt(), Some(agent_def.tools.clone()))
                                 } else {
-                                    (system_prompt.clone(), None)
+                                    let store = router_skill_store.lock().await;
+                                    (build_prompt_with_skills(&system_prompt, &store), None)
                                 }
                             } else {
-                                (system_prompt.clone(), None)
+                                let store = router_skill_store.lock().await;
+                                (build_prompt_with_skills(&system_prompt, &store), None)
                             };
 
                             let mut s = if let Some(ref f) = filter {
@@ -527,8 +529,12 @@ pub async fn run() -> i32 {
                             sessions.remove(&session_key);
                             consecutive_errors.remove(&m.sender);
                             // Re-create fresh.
+                            let fresh_prompt = {
+                                let store = router_skill_store.lock().await;
+                                build_prompt_with_skills(&system_prompt, &store)
+                            };
                             let mut s = ConversationSession::new(
-                                &session_key, system_prompt.clone(), max_history,
+                                &session_key, fresh_prompt, max_history,
                             );
                             if !router_mcp_tool_defs.is_empty() {
                                 s.add_tools(router_mcp_tool_defs.clone());
@@ -903,7 +909,8 @@ pub async fn run() -> i32 {
                                             if let Some(agent_def) = store.get(&target_agent) {
                                                 (agent_def.load_prompt(), Some(agent_def.tools.clone()))
                                             } else {
-                                                (system_prompt.clone(), None)
+                                                let ss = router_skill_store.lock().await;
+                                                (build_prompt_with_skills(&system_prompt, &ss), None)
                                             }
                                         };
                                         let mut s = if let Some(ref f) = filter {
@@ -1350,6 +1357,21 @@ const TOOL_KEYWORDS: &[&str] = &[
     // English tool triggers
     "search", "remind", "weather", "code", "file", "run",
 ];
+
+/// Build system prompt with prompt-type skills appended.
+fn build_prompt_with_skills(base_prompt: &str, skill_store: &SkillStore) -> String {
+    let prompt_skills = skill_store.prompt_skills();
+    if prompt_skills.is_empty() {
+        return base_prompt.to_string();
+    }
+
+    let mut result = base_prompt.to_string();
+    result.push_str("\n\n## 활성 프롬프트 스킬\n\n");
+    for (name, _desc, content) in &prompt_skills {
+        result.push_str(&format!("### {name}\n\n{content}\n\n"));
+    }
+    result
+}
 
 /// Decide whether a message is simple enough for the fast (cheap) model.
 /// Returns true for casual conversation, false for tool-likely messages.

@@ -68,7 +68,7 @@ pub const CORE_TOOL_NAMES: &[&str] = &[
 
 /// Maximum number of tool definitions to send to the API.
 /// Models like grok-3-mini struggle with >15 tools.
-pub const MAX_API_TOOLS: usize = 20;
+pub const MAX_API_TOOLS: usize = 40;
 
 /// Return only the core tool definitions (for smaller models).
 pub fn core_tool_definitions() -> Vec<ToolDefinition> {
@@ -227,7 +227,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "claude_code".to_string(),
-            description: "Claude Code를 실행해서 복잡한 코딩 작업을 수행한다. 새 프로젝트 생성, 코드 리팩토링, 버그 수정 등.".to_string(),
+            description: "Claude Code를 실행해서 복잡한 코딩 작업을 수행한다. host를 지정하면 SSH로 원격 서버에서 실행한다.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -237,7 +237,15 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "working_dir": {
                         "type": "string",
-                        "description": "작업 디렉토리 (기본: ~/work)"
+                        "description": "작업 디렉토리 (기본: ~/work). 원격 서버일 경우 원격 경로."
+                    },
+                    "host": {
+                        "type": "string",
+                        "description": "원격 서버 (user@hostname). 지정하면 SSH로 해당 서버에서 Claude Code 실행."
+                    },
+                    "port": {
+                        "type": "integer",
+                        "description": "SSH 포트 (기본: 22)"
                     }
                 },
                 "required": ["prompt"]
@@ -283,7 +291,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "schedule_reminder".to_string(),
-            description: "리마인더나 반복 작업을 예약한다. 특정 시간에 알림을 보내거나 정기적으로 알림을 반복할 때 사용.".to_string(),
+            description: "리마인더를 예약한다. message와 함께 반드시 datetime(일회성) 또는 cron_expr(반복) 중 하나를 지정해야 한다.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -293,11 +301,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "cron_expr": {
                         "type": "string",
-                        "description": "5자리 cron 표현식 (분 시 일 월 요일). 예: '0 9 * * *'은 매일 9시"
+                        "description": "반복 알림용 5자리 cron 표현식 (분 시 일 월 요일). 예: '0 9 * * *'은 매일 9시. datetime과 둘 중 하나 필수."
                     },
                     "datetime": {
                         "type": "string",
-                        "description": "일회성 알림 시간 (ISO 8601). 예: '2026-05-01T09:00:00' 또는 '2026-05-01 09:00'"
+                        "description": "일회성 알림 시간. 예: '2026-05-01 09:00' 또는 '2026-05-01T09:00:00'. cron_expr과 둘 중 하나 필수."
                     },
                     "repeat": {
                         "type": "boolean",
@@ -494,6 +502,74 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["title"]
             }),
         },
+        // ── Skill management ──────────────────────────────────────────
+        ToolDefinition {
+            name: "skill_install".to_string(),
+            description: "스킬 레지스트리에서 새 스킬을 설치한다. 이름만 지정하면 기본 레지스트리(yhc007/sam-skills)에서, owner/repo/name 형식이면 해당 레포에서 설치.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "설치할 스킬 이름. 예: 'calculator' 또는 'yhc007/sam-skills/calculator'"
+                    }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDefinition {
+            name: "skill_uninstall".to_string(),
+            description: "설치된 스킬을 삭제한다.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "삭제할 스킬 이름"
+                    }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDefinition {
+            name: "skill_list".to_string(),
+            description: "현재 설치된 스킬 목록을 보여준다.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDefinition {
+            name: "skill_search".to_string(),
+            description: "스킬 레지스트리에서 설치 가능한 스킬을 검색한다. query 없이 호출하면 전체 목록을 보여준다.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "검색 키워드 (이름이나 설명에 포함된 단어). 생략하면 전체 목록."
+                    }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "skill_import".to_string(),
+            description: "ClawHub(OpenClaw) 스킬을 가져와서 Sam 프롬프트 스킬로 설치한다. GitHub URL 또는 slug를 지정.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "source": {
+                        "type": "string",
+                        "description": "ClawHub 스킬 소스. GitHub URL(예: 'https://github.com/user/repo') 또는 ClawHub slug(예: 'code-review')"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Sam에 저장할 스킬 이름 (생략 시 소스에서 추출)"
+                    }
+                },
+                "required": ["source"]
+            }),
+        },
     ]
 }
 
@@ -539,6 +615,11 @@ pub async fn execute_builtin_no_flow(
         "browser" => exec_browser(input, ctx).await,
         "generate_image" => exec_generate_image(input, ctx).await,
         "generate_chart" => exec_generate_chart(input, ctx).await,
+        "skill_install" => exec_skill_install(input, ctx).await,
+        "skill_uninstall" => exec_skill_uninstall(input, ctx).await,
+        "skill_list" => exec_skill_list(ctx).await,
+        "skill_search" => exec_skill_search(input).await,
+        "skill_import" => exec_skill_import(input, ctx).await,
         _ => {
             // Try custom skill store first.
             if let Some(skill_store) = &ctx.skill_store {
@@ -801,7 +882,89 @@ fn exec_write_file(input: &serde_json::Value) -> Result<String, String> {
 async fn exec_claude_code(input: &serde_json::Value, ctx: &ToolContext<'_>) -> Result<String, String> {
     let prompt = input["prompt"].as_str().ok_or("missing 'prompt' parameter")?;
     let cc = &ctx.config.claude_code;
+    let host = input["host"].as_str();
+    let port = input["port"].as_u64().unwrap_or(22);
 
+    let timeout_secs = cc.hard_timeout_secs;
+    let max_turns = cc.max_turns.to_string();
+
+    // ── Remote execution via SSH ──────────────────────────────────────
+    if let Some(host) = host {
+        let working_dir = input["working_dir"]
+            .as_str()
+            .unwrap_or("~");
+
+        info!(
+            prompt_len = prompt.len(),
+            host = host,
+            port = port,
+            cwd = %working_dir,
+            "launching Claude Code on remote host"
+        );
+
+        // Build remote command: cd to working_dir then run claude.
+        // Escape single quotes in the prompt for shell safety.
+        let escaped_prompt = prompt.replace('\'', "'\\''");
+        let remote_cmd = format!(
+            "cd {} && claude --print --output-format text --max-turns {} --dangerously-skip-permissions '{}'",
+            working_dir, max_turns, escaped_prompt
+        );
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            Command::new("ssh")
+                .arg("-o").arg("StrictHostKeyChecking=accept-new")
+                .arg("-o").arg("ConnectTimeout=10")
+                .arg("-o").arg("BatchMode=yes")
+                .arg("-o").arg("LogLevel=ERROR")
+                .arg("-p").arg(port.to_string())
+                .arg(host)
+                .arg(&remote_cmd)
+                .env("CLAUDE_CODE_ENTRYPOINT", "sam-agent")
+                .output(),
+        )
+        .await;
+
+        return match result {
+            Ok(Ok(output)) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let code = output.status.code().unwrap_or(-1);
+
+                if code != 0 && stdout.contains("Reached max turns") {
+                    warn!(max_turns = cc.max_turns, host = host, "Remote Claude Code hit max-turns cap");
+                    return Err(format!(
+                        "원격 Claude Code가 {turn}턴 한도에 도달했습니다. 원본 출력: {out}",
+                        turn = cc.max_turns,
+                        out = truncate_output(&stdout, MAX_OUTPUT_BYTES / 4),
+                    ));
+                }
+
+                if code != 0 {
+                    warn!(code = code, host = host, "Remote Claude Code exited with error");
+                }
+
+                let tag = format!("[CC:{host}:{working_dir}]\n");
+                let tag_len = tag.len();
+                let mut result = tag;
+                if !stdout.is_empty() {
+                    result.push_str(&truncate_output(&stdout, MAX_OUTPUT_BYTES));
+                }
+                if !stderr.is_empty() && code != 0 {
+                    result.push_str("\n[stderr]\n");
+                    result.push_str(&truncate_output(&stderr, MAX_OUTPUT_BYTES / 4));
+                }
+                if result.len() == tag_len {
+                    result.push_str("완료, 출력 없음.");
+                }
+                Ok(result)
+            }
+            Ok(Err(e)) => Err(format!("원격 SSH 실행 실패: {e}")),
+            Err(_) => Err(format!("원격 Claude Code 타임아웃: {timeout_secs}초 초과")),
+        };
+    }
+
+    // ── Local execution ───────────────────────────────────────────────
     let working_dir = input["working_dir"]
         .as_str()
         .map(sam_core::expand_tilde)
@@ -819,16 +982,12 @@ async fn exec_claude_code(input: &serde_json::Value, ctx: &ToolContext<'_>) -> R
         ));
     }
 
-    let timeout_secs = cc.hard_timeout_secs;
-
     info!(
         prompt_len = prompt.len(),
         cwd = %working_dir,
         binary = %binary.display(),
         "launching Claude Code"
     );
-
-    let max_turns = cc.max_turns.to_string();
 
     let result = tokio::time::timeout(
         Duration::from_secs(timeout_secs),
@@ -870,7 +1029,9 @@ async fn exec_claude_code(input: &serde_json::Value, ctx: &ToolContext<'_>) -> R
                 warn!(code = code, "Claude Code exited with error");
             }
 
-            let mut result = String::new();
+            let tag = format!("[CC:local:{working_dir}]\n");
+            let tag_len = tag.len();
+            let mut result = tag;
             if !stdout.is_empty() {
                 result.push_str(&truncate_output(&stdout, MAX_OUTPUT_BYTES));
             }
@@ -878,8 +1039,8 @@ async fn exec_claude_code(input: &serde_json::Value, ctx: &ToolContext<'_>) -> R
                 result.push_str("\n[stderr]\n");
                 result.push_str(&truncate_output(&stderr, MAX_OUTPUT_BYTES / 4));
             }
-            if result.is_empty() {
-                result = "Claude Code가 완료되었지만 출력이 없습니다.".to_string();
+            if result.len() == tag_len {
+                result.push_str("완료, 출력 없음.");
             }
             Ok(result)
         }
@@ -1935,6 +2096,221 @@ fn truncate_output(s: &str, max_bytes: usize) -> String {
     }
 }
 
+// ── Skill management ──────────────────────────────────────────────────
+
+async fn exec_skill_install(
+    input: &serde_json::Value,
+    ctx: &ToolContext<'_>,
+) -> Result<String, String> {
+    let name = input["name"].as_str().ok_or("missing 'name' parameter")?;
+    let skill_store = ctx.skill_store.as_ref().ok_or("skill system unavailable")?;
+    let mut store = skill_store.lock().await;
+    store.install_from_registry(name)
+}
+
+async fn exec_skill_uninstall(
+    input: &serde_json::Value,
+    ctx: &ToolContext<'_>,
+) -> Result<String, String> {
+    let name = input["name"].as_str().ok_or("missing 'name' parameter")?;
+    let skill_store = ctx.skill_store.as_ref().ok_or("skill system unavailable")?;
+    let mut store = skill_store.lock().await;
+    store.uninstall(name)
+}
+
+async fn exec_skill_search(input: &serde_json::Value) -> Result<String, String> {
+    let query = input["query"].as_str().unwrap_or("");
+    let registry_url = format!(
+        "https://raw.githubusercontent.com/{}/main/registry.json",
+        sam_core::DEFAULT_SKILL_REGISTRY
+    );
+
+    // Fetch registry.json via curl.
+    let output = Command::new("curl")
+        .args(["-s", "-f", "--connect-timeout", "5", &registry_url])
+        .output()
+        .await
+        .map_err(|e| format!("레지스트리 조회 실패: {e}"))?;
+
+    if !output.status.success() {
+        return Err("레지스트리 서버에 접속할 수 없음".to_string());
+    }
+
+    let body = String::from_utf8_lossy(&output.stdout);
+    let registry: sam_core::SkillRegistry = serde_json::from_str(&body)
+        .map_err(|e| format!("레지스트리 파싱 실패: {e}"))?;
+
+    let filtered: Vec<&sam_core::SkillRegistryEntry> = if query.is_empty() {
+        registry.skills.iter().collect()
+    } else {
+        let q = query.to_lowercase();
+        registry.skills.iter().filter(|s| {
+            s.name.to_lowercase().contains(&q)
+                || s.description.to_lowercase().contains(&q)
+                || s.tags.iter().any(|t| t.to_lowercase().contains(&q))
+        }).collect()
+    };
+
+    if filtered.is_empty() {
+        return Ok(format!("'{query}'에 해당하는 스킬 없음"));
+    }
+
+    let mut result = format!("사용 가능한 스킬 ({}/{}):\n", filtered.len(), registry.skills.len());
+    for s in &filtered {
+        result.push_str(&format!("  - {} : {}\n", s.name, s.description));
+    }
+    result.push_str("\n설치: skill_install(name: \"스킬이름\")");
+    Ok(result)
+}
+
+async fn exec_skill_import(
+    input: &serde_json::Value,
+    ctx: &ToolContext<'_>,
+) -> Result<String, String> {
+    let source = input["source"].as_str().ok_or("missing 'source' parameter")?;
+    let custom_name = input["name"].as_str();
+
+    // Determine GitHub URL for SKILL.md.
+    let (repo_url, skill_name) = if source.starts_with("https://github.com/") {
+        // Direct GitHub URL.
+        let cleaned = source.trim_end_matches('/').trim_end_matches(".git");
+        let parts: Vec<&str> = cleaned.split('/').collect();
+        if parts.len() < 5 {
+            return Err("GitHub URL 형식: https://github.com/owner/repo".to_string());
+        }
+        let name = custom_name.unwrap_or(parts[parts.len() - 1]);
+        (cleaned.to_string(), name.to_string())
+    } else {
+        // ClawHub slug — try openclaw/skills repo.
+        let name = custom_name.unwrap_or(source);
+        (
+            format!("https://github.com/openclaw/skills/tree/main/{source}"),
+            name.to_string(),
+        )
+    };
+
+    // Clone to temp dir.
+    let tmp = std::env::temp_dir().join(format!("sam_clawhub_import_{skill_name}"));
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    // For direct repos, clone the repo. For ClawHub slugs, clone openclaw/skills.
+    let git_url = if source.starts_with("https://github.com/") {
+        format!("{repo_url}.git")
+    } else {
+        "https://github.com/openclaw/skills.git".to_string()
+    };
+
+    let output = Command::new("git")
+        .args(["clone", "--depth", "1", &git_url, &tmp.to_string_lossy()])
+        .output()
+        .await
+        .map_err(|e| format!("git clone 실패: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(format!("git clone 실패: {stderr}"));
+    }
+
+    // Find SKILL.md.
+    let skill_md_path = if source.starts_with("https://github.com/") {
+        tmp.join("SKILL.md")
+    } else {
+        tmp.join(source).join("SKILL.md")
+    };
+
+    if !skill_md_path.exists() {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(format!("SKILL.md를 찾을 수 없음: {}", skill_md_path.display()));
+    }
+
+    let md_content = std::fs::read_to_string(&skill_md_path)
+        .map_err(|e| format!("SKILL.md 읽기 실패: {e}"))?;
+
+    // Parse YAML frontmatter: extract name, description.
+    let (description, body) = parse_skill_md(&md_content);
+    let desc = description.unwrap_or_else(|| format!("ClawHub에서 가져온 스킬: {skill_name}"));
+
+    // Create Sam prompt skill .toml.
+    let toml_content = format!(
+        r#"name = "{skill_name}"
+description = "{desc}"
+type = "prompt"
+
+prompt_content = """
+{body}
+"""
+"#
+    );
+
+    let tools_dir = sam_core::tools_dir();
+    let dest = tools_dir.join(format!("{skill_name}.toml"));
+    if dest.exists() {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(format!("스킬 '{skill_name}'이 이미 존재함"));
+    }
+
+    std::fs::write(&dest, &toml_content)
+        .map_err(|e| format!("스킬 저장 실패: {e}"))?;
+
+    // Save source info.
+    let meta = json!({
+        "source": source,
+        "type": "clawhub_import",
+        "imported_at": chrono::Local::now().to_rfc3339(),
+    });
+    let meta_path = tools_dir.join(format!(".{skill_name}.source.json"));
+    let _ = std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap_or_default());
+
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    // Reload skill store.
+    if let Some(skill_store) = &ctx.skill_store {
+        let mut store = skill_store.lock().await;
+        store.reload();
+    }
+
+    Ok(format!("ClawHub 스킬 '{skill_name}' 가져오기 완료 (프롬프트 스킬로 설치됨)\n설명: {desc}\n다음 메시지부터 활성화됩니다."))
+}
+
+/// Parse SKILL.md: extract description from YAML frontmatter and body content.
+fn parse_skill_md(content: &str) -> (Option<String>, String) {
+    // SKILL.md format: ---\nyaml frontmatter\n---\nbody
+    if !content.starts_with("---") {
+        return (None, content.to_string());
+    }
+
+    let rest = &content[3..];
+    if let Some(end) = rest.find("\n---") {
+        let frontmatter = &rest[..end];
+        let body = rest[end + 4..].trim().to_string();
+
+        // Extract description from frontmatter.
+        let desc = frontmatter
+            .lines()
+            .find(|l| l.starts_with("description:"))
+            .map(|l| l.trim_start_matches("description:").trim().trim_matches('"').to_string());
+
+        (desc, body)
+    } else {
+        (None, content.to_string())
+    }
+}
+
+async fn exec_skill_list(ctx: &ToolContext<'_>) -> Result<String, String> {
+    let skill_store = ctx.skill_store.as_ref().ok_or("skill system unavailable")?;
+    let store = skill_store.lock().await;
+    let skills = store.list();
+    if skills.is_empty() {
+        return Ok("설치된 스킬 없음".to_string());
+    }
+    let mut result = format!("설치된 스킬 ({}):\n", skills.len());
+    for s in skills {
+        result.push_str(&format!("  - {} : {}\n", s.name, s.description));
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1942,7 +2318,7 @@ mod tests {
     #[test]
     fn builtin_definitions_are_valid() {
         let defs = builtin_tool_definitions();
-        assert_eq!(defs.len(), 21);
+        assert_eq!(defs.len(), 26);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"memory_recall"));
         assert!(names.contains(&"run_command"));

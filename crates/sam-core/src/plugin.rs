@@ -625,6 +625,7 @@ fn load_plugin_skills(dir: &Path, plugin_dir: &Path) -> Vec<CustomSkill> {
                 skills.push(CustomSkill {
                     name: tool.name,
                     description: tool.description,
+                    skill_type: crate::skill_store::SkillType::Tool,
                     input_schema: schema,
                     exec: crate::skill_store::SkillExec {
                         command,
@@ -632,6 +633,8 @@ fn load_plugin_skills(dir: &Path, plugin_dir: &Path) -> Vec<CustomSkill> {
                         timeout_secs: tool.exec.timeout_secs,
                         env: tool.exec.env,
                     },
+                    requires: crate::skill_store::SkillRequires::default(),
+                    prompt_content: None,
                 });
             }
             Err(e) => {
