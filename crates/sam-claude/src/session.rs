@@ -271,6 +271,9 @@ impl ConversationSession {
         // Track how many times each tool has been called to prevent loops.
         let mut tool_call_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
         const MAX_SAME_TOOL_CALLS: u32 = 2;
+        // Collect __ATTACHMENT__ markers from tool results so they're
+        // always included in the final response (LLM may omit them).
+        let mut collected_attachments: Vec<String> = Vec::new();
 
         for round in 0..MAX_TOOL_ROUNDS {
             let resp = match client
@@ -354,6 +357,14 @@ impl ConversationSession {
                         Ok(text) => (text, false),
                         Err(err) => (err, true),
                     };
+                    // Collect __ATTACHMENT__ markers from tool results.
+                    if !is_error {
+                        for line in result_text.lines() {
+                            if let Some(path) = line.strip_prefix("__ATTACHMENT__:") {
+                                collected_attachments.push(path.to_string());
+                            }
+                        }
+                    }
                     info!(
                         tool = %tc.name,
                         is_error = is_error,
@@ -388,12 +399,20 @@ impl ConversationSession {
             );
 
             // Handle empty response from LLM.
-            let final_text = if resp.text.trim().is_empty() {
+            let mut final_text = if resp.text.trim().is_empty() {
                 warn!(handle = %self.handle, "LLM returned empty response");
                 "미안, 응답을 생성하지 못했어. 다시 말해줘.".to_string()
             } else {
                 resp.text
             };
+
+            // Append collected __ATTACHMENT__ markers that the LLM may
+            // have omitted from its final response.
+            for att in &collected_attachments {
+                if !final_text.contains(&format!("__ATTACHMENT__:{att}")) {
+                    final_text.push_str(&format!("\n__ATTACHMENT__:{att}"));
+                }
+            }
 
             // Append final assistant message.
             self.history.push(ChatMessage::text("assistant", &final_text));
