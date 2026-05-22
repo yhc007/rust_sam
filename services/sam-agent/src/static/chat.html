@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0f3460">
+<link rel="manifest" href="/manifest.json">
+<title>Sam AI</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f0f0f; color: #e0e0e0; height: 100dvh; display: flex; }
+
+/* ── Sidebar ─────────────────────────────────────────────────────────── */
+.sidebar { width: 260px; background: #141425; border-right: 1px solid #2a2a4a; display: flex; flex-direction: column; flex-shrink: 0; }
+.sidebar .agent-sel { padding: 12px; border-bottom: 1px solid #2a2a4a; }
+.sidebar .agent-sel label { display: block; font-size: 11px; color: #888; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em; }
+.sidebar .agent-sel select { width: 100%; padding: 8px 10px; background: #0f0f1f; border: 1px solid #2a2a4a; border-radius: 6px; color: #e0e0e0; font-size: 13px; outline: none; cursor: pointer; }
+.sidebar .agent-sel .meta { margin-top: 8px; padding: 8px 10px; background: #0f0f1f; border: 1px solid #2a2a4a; border-radius: 6px; font-size: 11px; line-height: 1.5; }
+.sidebar .agent-sel .meta .row { display: flex; justify-content: space-between; gap: 8px; }
+.sidebar .agent-sel .meta .k { color: #666; }
+.sidebar .agent-sel .meta .v { color: #ccc; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.sidebar .actions { padding: 12px; border-bottom: 1px solid #2a2a4a; display: flex; gap: 8px; }
+.sidebar .actions button { flex: 1; padding: 8px 10px; background: #3a3aaa; border: none; border-radius: 6px; color: #fff; font-size: 12px; font-weight: 500; cursor: pointer; }
+.sidebar .actions button.secondary { background: #2a2a4a; }
+.sidebar .actions button:hover { opacity: 0.9; }
+.sidebar .sessions { flex: 1; overflow-y: auto; padding: 8px; }
+.sidebar .sessions .empty { padding: 16px; text-align: center; font-size: 12px; color: #555; }
+.sidebar .session { padding: 10px 12px; margin-bottom: 4px; border-radius: 6px; cursor: pointer; font-size: 13px; color: #aaa; display: flex; align-items: center; gap: 6px; }
+.sidebar .session:hover { background: #1e1e3a; color: #e0e0e0; }
+.sidebar .session.active { background: #2a2a5a; color: #fff; }
+.sidebar .session .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar .session .count { font-size: 11px; color: #666; flex-shrink: 0; }
+.sidebar .session .iconbtn { display: none; background: transparent; border: none; color: #888; cursor: pointer; font-size: 13px; padding: 0 4px; flex-shrink: 0; }
+.sidebar .session:hover .iconbtn { display: inline; }
+.sidebar .session .edit:hover { color: #8af; }
+.sidebar .session .del:hover { color: #e88; }
+.sidebar .session .info { display: flex; flex-direction: column; flex: 1; min-width: 0; gap: 2px; }
+.sidebar .session .workdir { font-size: 10px; color: #556; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar .session.active .workdir { color: #668; }
+.sidebar .session input.rename { flex: 1; min-width: 0; padding: 4px 6px; background: #0f0f1f; border: 1px solid #4a4a8a; border-radius: 4px; color: #e0e0e0; font-size: 13px; outline: none; }
+
+/* ── Main ────────────────────────────────────────────────────────────── */
+.main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.header { padding: 12px 20px; background: #1a1a2e; border-bottom: 1px solid #2a2a4a; display: flex; align-items: center; gap: 12px; }
+.header h1 { font-size: 16px; font-weight: 600; color: #fff; }
+.header .status { font-size: 12px; color: #888; }
+.header .mem-btn { margin-left: auto; padding: 6px 14px; background: #2a2a4a; border: 1px solid #3a3a5a; border-radius: 6px; color: #aaa; cursor: pointer; font-size: 12px; }
+.header .mem-btn:hover { background: #3a3a5a; color: #fff; }
+.header .mem-btn:first-of-type { margin-left: auto; }
+.chat { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; -webkit-overflow-scrolling: touch; }
+.msg { max-width: 80%; padding: 12px 16px; border-radius: 12px; line-height: 1.6; white-space: pre-wrap; word-wrap: break-word; font-size: 14px; }
+.msg.user { align-self: flex-end; background: #1e3a5f; color: #e0e8f0; border-bottom-right-radius: 4px; }
+.msg.sam { align-self: flex-start; background: #1a1a2e; color: #d0d0e0; border-bottom-left-radius: 4px; border: 1px solid #2a2a4a; }
+.msg.system { align-self: center; background: transparent; color: #666; font-size: 12px; font-style: italic; }
+.msg a { color: #64b5f6; text-decoration: underline; }
+.msg code { background: rgba(255,255,255,0.08); padding: 2px 6px; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+.msg pre { background: rgba(0,0,0,0.3); padding: 10px; border-radius: 6px; overflow-x: auto; margin: 6px 0; }
+.msg pre code { background: none; padding: 0; }
+.typing { align-self: flex-start; padding: 12px 16px; color: #888; font-size: 14px; }
+.typing::after { content: '...'; animation: dots 1.5s infinite; }
+@keyframes dots { 0%,20% { content: '.'; } 40% { content: '..'; } 60%,100% { content: '...'; } }
+.input-area { padding: 16px 24px; padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 16px); background: #1a1a2e; border-top: 1px solid #2a2a4a; }
+.input-row { display: flex; gap: 8px; max-width: 900px; margin: 0 auto; }
+.input-row input { flex: 1; padding: 12px 16px; background: #0f0f1f; border: 1px solid #2a2a4a; border-radius: 8px; color: #e0e0e0; font-size: 14px; outline: none; }
+.input-row input:focus { border-color: #4a4a8a; }
+.input-row input:disabled { opacity: 0.5; }
+.input-row button { padding: 12px 20px; background: #3a3aaa; border: none; border-radius: 8px; color: #fff; cursor: pointer; font-size: 14px; font-weight: 500; }
+.input-row button:hover { background: #4a4abb; }
+.input-row button:disabled { background: #2a2a4a; color: #666; cursor: not-allowed; }
+
+/* ── Memory modal ────────────────────────────────────────────────────── */
+.modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); z-index: 10; justify-content: center; align-items: center; }
+.modal.show { display: flex; }
+.modal-content { background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 12px; padding: 24px; min-width: 320px; }
+.modal-content h2 { margin-bottom: 16px; font-size: 16px; }
+.modal-content .stat { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #2a2a4a; font-size: 13px; }
+.modal-content .close { margin-top: 16px; padding: 8px 16px; background: #2a2a4a; border: 1px solid #3a3a5a; border-radius: 6px; color: #ccc; cursor: pointer; }
+.modal-content .dream-btn { margin-top: 8px; padding: 8px 16px; background: #3a3a8a; border: none; border-radius: 6px; color: #fff; cursor: pointer; }
+
+/* ── Map (knowledge graph) overlay ───────────────────────────────────── */
+.map-overlay { display: none; position: fixed; inset: 0; background: #0a0a15; z-index: 20; flex-direction: column; }
+.map-overlay.show { display: flex; }
+.map-header { padding: 12px 20px; background: #1a1a2e; border-bottom: 1px solid #2a2a4a; display: flex; align-items: center; gap: 12px; }
+.map-header h2 { font-size: 16px; font-weight: 600; color: #fff; }
+.map-header .sub { font-size: 12px; color: #888; }
+.map-header .actions { margin-left: auto; display: flex; gap: 8px; }
+.map-header button { padding: 6px 14px; background: #2a2a4a; border: 1px solid #3a3a5a; border-radius: 6px; color: #ccc; cursor: pointer; font-size: 12px; }
+.map-header button.primary { background: #3a3aaa; border-color: #3a3aaa; color: #fff; }
+.map-header button:hover { opacity: 0.9; }
+.map-body { flex: 1; position: relative; }
+#cy { position: absolute; inset: 0; }
+.map-status { position: absolute; top: 16px; left: 16px; padding: 8px 14px; background: rgba(26,26,46,0.9); border: 1px solid #2a2a4a; border-radius: 6px; color: #aaa; font-size: 12px; }
+.map-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #555; font-size: 14px; gap: 8px; }
+
+/* ── Login overlay ───────────────────────────────────────────────────── */
+.login-overlay { display: none; position: fixed; inset: 0; background: #0a0a15; z-index: 30; align-items: center; justify-content: center; }
+.login-overlay.show { display: flex; }
+.login-card { background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 12px; padding: 32px; min-width: 320px; max-width: 360px; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+.login-card h1 { font-size: 20px; font-weight: 600; color: #fff; margin-bottom: 4px; }
+.login-card .sub { font-size: 13px; color: #888; margin-bottom: 24px; }
+.login-card label { display: block; font-size: 11px; color: #888; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em; }
+.login-card input { width: 100%; padding: 10px 12px; background: #0f0f1f; border: 1px solid #2a2a4a; border-radius: 6px; color: #e0e0e0; font-size: 14px; outline: none; margin-bottom: 14px; }
+.login-card input:focus { border-color: #4a4a8a; }
+.login-card button { width: 100%; padding: 10px 16px; background: #3a3aaa; border: none; border-radius: 6px; color: #fff; font-size: 14px; font-weight: 500; cursor: pointer; }
+.login-card button:hover { background: #4a4abb; }
+.login-card button:disabled { background: #2a2a4a; color: #666; cursor: not-allowed; }
+.login-error { color: #e88; font-size: 12px; margin-bottom: 12px; min-height: 16px; }
+
+/* ── LLM Modal ───────────────────────────────────────────────────────── */
+.llm-modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 20; align-items: center; justify-content: center; }
+.llm-modal.show { display: flex; }
+.llm-modal-content { background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 12px; padding: 24px; min-width: 360px; max-width: 480px; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+.llm-modal-content h2 { font-size: 16px; font-weight: 600; color: #fff; margin-bottom: 16px; }
+.llm-section { margin-bottom: 14px; padding: 10px 12px; background: #0f0f1f; border: 1px solid #2a2a4a; border-radius: 8px; }
+.llm-section .title { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+.llm-section .title .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.llm-section .title .dot.on { background: #4caf50; }
+.llm-section .title .dot.off { background: #e44; }
+.llm-section .row { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; line-height: 1.8; }
+.llm-section .row .k { color: #666; }
+.llm-section .row .v { color: #ccc; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; text-align: right; word-break: break-all; }
+.llm-budget { margin-bottom: 14px; }
+.llm-budget .bar-bg { height: 6px; background: #2a2a4a; border-radius: 3px; overflow: hidden; margin-top: 4px; }
+.llm-budget .bar-fill { height: 100%; background: #3a3aaa; border-radius: 3px; transition: width 0.3s; }
+.llm-budget .label { font-size: 11px; color: #888; display: flex; justify-content: space-between; }
+
+/* ── Tool Status Bar ──────────────────────────────────────────────────── */
+.tool-status { display: none; padding: 8px 20px; background: #1a1a2e; border-bottom: 1px solid #2a2a4a; }
+.tool-status.active { display: block; }
+.tool-status-items { display: flex; flex-direction: column; gap: 6px; }
+.tool-item { display: flex; align-items: center; gap: 10px; font-size: 12px; color: #aaa; }
+.tool-item .indicator { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.tool-item .indicator.running { background: #4caf50; animation: pulse-dot 1.5s infinite; }
+.tool-item .indicator.completed { background: #666; }
+.tool-item .tool-name { font-weight: 600; color: #8af; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; min-width: 100px; }
+.tool-item .tool-desc { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ccc; }
+.tool-item .tool-elapsed { color: #888; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; flex-shrink: 0; }
+@keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+/* ── Mobile ──────────────────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  .sidebar { display: none; }
+  .header h1 { font-size: 14px; }
+  .msg { max-width: 92%; }
+  .input-row { gap: 6px; }
+  .input-row input { padding: 10px 12px; font-size: 16px; }
+}
+</style>
+</head>
+<body>
+
+<div class="login-overlay" id="loginOverlay">
+  <div class="login-card">
+    <h1>Sign in to Sam</h1>
+    <div class="sub">Enter your credentials to continue.</div>
+    <form id="loginForm" onsubmit="return doLogin(event)">
+      <label for="loginUser">Username</label>
+      <input type="text" id="loginUser" autocomplete="username" autofocus />
+      <label for="loginPass">Password</label>
+      <input type="password" id="loginPass" autocomplete="current-password" />
+      <div class="login-error" id="loginError"></div>
+      <button type="submit" id="loginBtn">Sign in</button>
+    </form>
+  </div>
+</div>
+
+<aside class="sidebar">
+  <div class="agent-sel">
+    <label>Agent</label>
+    <select id="agentSelect" onchange="onAgentChange()"></select>
+    <div class="meta" id="agentMeta"></div>
+  </div>
+  <div class="actions">
+    <button onclick="newSession()">+ New Session</button>
+  </div>
+  <div class="sessions" id="sessionList">
+    <div class="empty">No sessions yet</div>
+  </div>
+</aside>
+
+<div class="main">
+  <div class="header">
+    <h1>Sam AI</h1>
+    <span class="status" id="sessionStatus">No session</span>
+    <button class="mem-btn" onclick="showLlm()">LLM</button>
+    <button class="mem-btn" onclick="showMap()">Map</button>
+    <button class="mem-btn" onclick="showMemory()">Memory</button>
+    <button class="mem-btn" onclick="doLogout()">Logout</button>
+  </div>
+
+  <div class="tool-status" id="toolStatus">
+    <div class="tool-status-items" id="toolStatusItems"></div>
+  </div>
+
+  <div class="chat" id="chat">
+    <div class="msg system">Select or create a session to start.</div>
+  </div>
+
+  <div class="input-area">
+    <div class="input-row">
+      <input type="text" id="input" placeholder="Type a message..." autocomplete="off" disabled enterkeyhint="send" />
+      <button id="send" onclick="sendMessage()" disabled>Send</button>
+    </div>
+  </div>
+</div>
+
+<div class="llm-modal" id="llmModal">
+  <div class="llm-modal-content">
+    <h2>LLM Configuration</h2>
+    <div id="llmContent">Loading...</div>
+    <button class="mem-btn" onclick="closeLlm()" style="width:100%;margin-top:12px;padding:8px;">Close</button>
+  </div>
+</div>
+
+<div class="map-overlay" id="mapOverlay">
+  <div class="map-header">
+    <h2>Knowledge Graph</h2>
+    <span class="sub" id="mapSub"></span>
+    <div class="actions">
+      <button class="primary" onclick="refreshMap()">Refresh</button>
+      <button onclick="closeMap()">Close</button>
+    </div>
+  </div>
+  <div class="map-body">
+    <div id="cy"></div>
+    <div class="map-status" id="mapStatus" style="display:none"></div>
+    <div class="map-empty" id="mapEmpty" style="display:none">
+      <div>No triples extracted yet.</div>
+      <div style="font-size:12px; color:#444;">Send a few factual statements in the chat, then click Refresh.</div>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="memModal">
+  <div class="modal-content">
+    <h2>Memory-Brain <span id="memAgentName" style="color:#888; font-weight:normal; font-size:13px;"></span></h2>
+    <div id="memStats"></div>
+    <button class="dream-btn" onclick="runDream()">Run Dream Consolidation</button>
+    <button class="close" onclick="closeMemory()">Close</button>
+  </div>
+</div>
+
+<script src="https://unpkg.com/cytoscape@3.28.0/dist/cytoscape.min.js"></script>
+<script>
+const chat = document.getElementById('chat');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+const agentSelect = document.getElementById('agentSelect');
+const agentMeta = document.getElementById('agentMeta');
+const sessionList = document.getElementById('sessionList');
+const sessionStatus = document.getElementById('sessionStatus');
+
+let agents = [];
+let sessions = [];
+let currentAgent = null;
+let currentSession = null;
+let sessionHistories = {};
+let sending = false;
+
+input.addEventListener('keydown', e => { if (e.key === 'Enter' && !sending) sendMessage(); });
+
+// ── Boot ────────────────────────────────────────────────────────────────
+
+(async function boot() {
+  try {
+    const res = await fetch('/api/me');
+    const data = await res.json();
+    if (data.authenticated) {
+      hideLogin();
+      await initAuthed();
+    } else {
+      showLogin();
+    }
+  } catch (e) {
+    showLogin();
+  }
+})();
+
+function showLogin() { document.getElementById('loginOverlay').classList.add('show'); document.getElementById('loginUser').focus(); }
+function hideLogin() { document.getElementById('loginOverlay').classList.remove('show'); }
+
+async function doLogin(ev) {
+  ev.preventDefault();
+  const u = document.getElementById('loginUser').value.trim();
+  const p = document.getElementById('loginPass').value;
+  const err = document.getElementById('loginError');
+  const btn = document.getElementById('loginBtn');
+  err.textContent = '';
+  btn.disabled = true; btn.textContent = 'Signing in...';
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: u, password: p })
+    });
+    if (!res.ok) {
+      err.textContent = res.status === 401 ? 'Invalid username or password' : ('Error: ' + await res.text());
+      btn.disabled = false; btn.textContent = 'Sign in';
+      return false;
+    }
+    document.getElementById('loginPass').value = '';
+    hideLogin();
+    btn.disabled = false; btn.textContent = 'Sign in';
+    await initAuthed();
+  } catch (e) {
+    err.textContent = 'Network error: ' + e.message;
+    btn.disabled = false; btn.textContent = 'Sign in';
+  }
+  return false;
+}
+
+async function doLogout() {
+  try { await fetch('/api/logout', { method: 'POST' }); } catch {}
+  agents = []; sessions = []; currentAgent = null; currentSession = null;
+  sessionHistories = {};
+  agentSelect.innerHTML = ''; agentMeta.textContent = '';
+  sessionList.innerHTML = ''; sessionStatus.textContent = 'No session';
+  chat.innerHTML = '';
+  showLogin();
+}
+
+async function initAuthed() {
+  try {
+    const res = await fetch('/api/agents');
+    if (res.status === 401) { showLogin(); return; }
+    agents = await res.json();
+    renderAgents();
+    if (agents.length > 0) selectAgent(agents[0].id);
+    await refreshSessions();
+  } catch (e) {
+    console.error('init failed', e);
+  }
+}
+
+// ── Agents ──────────────────────────────────────────────────────────────
+
+function renderAgents() {
+  agentSelect.innerHTML = '';
+  for (const a of agents) {
+    const opt = document.createElement('option');
+    opt.value = a.id;
+    opt.textContent = a.name + ' \u2014 ' + a.model;
+    agentSelect.appendChild(opt);
+  }
+}
+
+function selectAgent(id) {
+  currentAgent = agents.find(a => a.id === id);
+  agentSelect.value = id;
+  if (currentAgent) {
+    agentMeta.innerHTML =
+      '<div class="row"><span class="k">model</span><span class="v">' + esc(currentAgent.model) + '</span></div>' +
+      '<div class="row"><span class="k">provider</span><span class="v">' + esc(currentAgent.provider) + '</span></div>' +
+      '<div class="row"><span class="k">memory</span><span class="v">' + esc(currentAgent.namespace) + '</span></div>';
+  } else {
+    agentMeta.textContent = '';
+  }
+  renderSessions();
+}
+
+function onAgentChange() {
+  selectAgent(agentSelect.value);
+  currentSession = null;
+  updateInputState(); renderChat();
+  sessionStatus.textContent = 'No session';
+}
+
+// ── Sessions ────────────────────────────────────────────────────────────
+
+async function refreshSessions() {
+  const res = await fetch('/api/sessions');
+  if (res.status === 401) { showLogin(); return; }
+  sessions = await res.json();
+  if (currentSession && !sessions.find(s => s.session_id === currentSession)) {
+    invalidateSession('Session expired. Create a new one.');
+  }
+  renderSessions();
+}
+
+function invalidateSession(reason) {
+  currentSession = null;
+  sessionStatus.textContent = 'No session';
+  updateInputState(); renderChat();
+  if (reason) {
+    const div = document.createElement('div');
+    div.className = 'msg system'; div.textContent = reason;
+    chat.appendChild(div);
+  }
+}
+
+function sessionLabel(s) {
+  return (s.name && s.name.trim().length > 0) ? s.name : 'Session ' + s.session_id.slice(0, 8);
+}
+
+function shortenPath(p) {
+  // Show last 2 path components: /a/b/c/d → c/d
+  const parts = p.replace(/\/+$/, '').split('/').filter(Boolean);
+  if (parts.length <= 2) return p;
+  return '…/' + parts.slice(-2).join('/');
+}
+
+function renderSessions() {
+  sessionList.innerHTML = '';
+  if (!currentAgent) return;
+  const mine = sessions.filter(s => s.agent_id === currentAgent.id);
+  if (mine.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty'; empty.textContent = 'No sessions yet';
+    sessionList.appendChild(empty); return;
+  }
+  for (const s of mine) {
+    const div = document.createElement('div');
+    div.className = 'session' + (s.session_id === currentSession ? ' active' : '');
+    const wdHtml = s.working_dir ? '<span class="workdir" title="' + esc(s.working_dir) + '">' + esc(shortenPath(s.working_dir)) + '</span>' : '';
+    div.innerHTML =
+      '<div class="info"><span class="label" title="' + esc(sessionLabel(s)) + '">' + esc(sessionLabel(s)) + '</span>' + wdHtml + '</div>' +
+      '<span class="count">' + s.message_count + '</span>' +
+      '<button class="iconbtn edit" title="Rename">\u270E</button>' +
+      '<button class="iconbtn del" title="Delete">\u00D7</button>';
+    div.onclick = (e) => {
+      if (e.target.classList.contains('iconbtn')) return;
+      if (div.querySelector('input.rename')) return;
+      switchSession(s.session_id);
+    };
+    div.querySelector('.edit').onclick = (e) => { e.stopPropagation(); enterRenameMode(div, s); };
+    div.querySelector('.del').onclick = (e) => { e.stopPropagation(); deleteSession(s.session_id); };
+    sessionList.appendChild(div);
+  }
+}
+
+function enterRenameMode(div, s) {
+  const labelEl = div.querySelector('.label');
+  const inp = document.createElement('input');
+  inp.type = 'text'; inp.className = 'rename';
+  inp.value = s.name || ''; inp.placeholder = 'Session name'; inp.maxLength = 80;
+  div.replaceChild(inp, labelEl);
+  inp.focus(); inp.select();
+  const commit = async () => {
+    if (inp.dataset.committed) return;
+    inp.dataset.committed = '1';
+    const value = inp.value.trim();
+    try {
+      await fetch('/api/sessions/' + encodeURIComponent(s.session_id), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: value.length > 0 ? value : null })
+      });
+    } catch (e) { /* ignore */ }
+    await refreshSessions();
+  };
+  inp.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); commit(); }
+    else if (e.key === 'Escape') { e.preventDefault(); inp.dataset.committed = '1'; renderSessions(); }
+  });
+  inp.addEventListener('blur', () => commit());
+}
+
+async function newSession() {
+  if (!currentAgent) return;
+  const res = await fetch('/api/sessions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent_id: currentAgent.id })
+  });
+  if (!res.ok) { alert('Failed: ' + await res.text()); return; }
+  const data = await res.json();
+  sessionHistories[data.session_id] = [];
+  await refreshSessions();
+  switchSession(data.session_id);
+}
+
+function switchSession(sid) {
+  currentSession = sid;
+  const meta = sessions.find(s => s.session_id === sid);
+  if (meta) {
+    const agent = agents.find(a => a.id === meta.agent_id);
+    if (agent && (!currentAgent || currentAgent.id !== agent.id)) selectAgent(agent.id);
+    sessionStatus.textContent = sessionLabel(meta) + ' \u00B7 ' + (agent ? agent.name : meta.agent_id);
+  }
+  updateInputState(); renderChat(); renderSessions();
+}
+
+async function deleteSession(sid) {
+  if (!confirm('Delete this session?')) return;
+  await fetch('/api/sessions/' + encodeURIComponent(sid), { method: 'DELETE' });
+  delete sessionHistories[sid];
+  if (currentSession === sid) {
+    currentSession = null; sessionStatus.textContent = 'No session';
+    updateInputState(); renderChat();
+  }
+  await refreshSessions();
+}
+
+// ── Chat ────────────────────────────────────────────────────────────────
+
+function updateInputState() {
+  const ok = !!currentSession;
+  input.disabled = !ok;
+  sendBtn.disabled = !ok || sending;
+  if (ok) input.focus();
+}
+
+function renderChat() {
+  chat.innerHTML = '';
+  if (!currentSession) {
+    const sys = document.createElement('div');
+    sys.className = 'msg system'; sys.textContent = 'Select or create a session to start.';
+    chat.appendChild(sys); return;
+  }
+  const history = sessionHistories[currentSession] || [];
+  if (history.length === 0) {
+    const sys = document.createElement('div');
+    sys.className = 'msg system'; sys.textContent = 'New session \u2014 type a message.';
+    chat.appendChild(sys);
+  }
+  for (const m of history) addMsg(m.role, m.text, false);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+async function sendMessage() {
+  if (!currentSession) return;
+  const text = input.value.trim();
+  if (!text || sending) return;
+  sending = true; sendBtn.disabled = true; input.value = '';
+
+  const sid = currentSession;
+  if (!sessionHistories[sid]) sessionHistories[sid] = [];
+  sessionHistories[sid].push({ role: 'user', text });
+  addMsg('user', text, true);
+
+  const typing = document.createElement('div');
+  typing.className = 'typing'; typing.textContent = 'Sam is thinking';
+  chat.appendChild(typing); chat.scrollTop = chat.scrollHeight;
+
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sid, message: text })
+    });
+    typing.remove();
+    if (res.status === 401) { showLogin(); sending = false; updateInputState(); return; }
+    if (!res.ok) {
+      const err = await res.text();
+      addMsg('sam', 'Error: ' + err, true);
+      sessionHistories[sid].push({ role: 'sam', text: 'Error: ' + err });
+      if (err.includes('unknown session') || res.status === 404) {
+        invalidateSession('Session expired. Create a new one.');
+        await refreshSessions();
+      }
+    } else {
+      const data = await res.json();
+      sessionHistories[sid].push({ role: 'sam', text: data.reply });
+      addMsg('sam', data.reply, true);
+    }
+  } catch (e) {
+    typing.remove();
+    addMsg('sam', 'Error: ' + e.message, true);
+  }
+  sending = false; updateInputState();
+  refreshSessions();
+}
+
+function addMsg(role, text, scroll) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  // Simple markdown-ish rendering.
+  div.innerHTML = renderMarkdown(text);
+  chat.appendChild(div);
+  if (scroll) chat.scrollTop = chat.scrollHeight;
+}
+
+function renderMarkdown(text) {
+  let h = esc(text);
+  // Code blocks (```)
+  h = h.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
+  // Inline code
+  h = h.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Bold
+  h = h.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  // Links
+  h = h.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+  return h;
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ── Memory ──────────────────────────────────────────────────────────────
+
+async function showMemory() {
+  if (!currentAgent) { alert('Select an agent first'); return; }
+  document.getElementById('memAgentName').textContent = '\u2014 ' + currentAgent.name;
+  try {
+    const res = await fetch('/api/memory?agent_id=' + encodeURIComponent(currentAgent.id));
+    const s = await res.json();
+    document.getElementById('memStats').innerHTML =
+      '<div class="stat"><span>Memories</span><span>' + s.total_memories + '</span></div>' +
+      '<div class="stat"><span>Concepts</span><span>' + s.total_concepts + '</span></div>' +
+      '<div class="stat"><span>Hippocampus</span><span>' + (s.hippocampus_active ? 'Active' : 'Off') + '</span></div>' +
+      '<div class="stat"><span>Neocortex</span><span>' + (s.neocortex_active ? 'Active' : 'Off') + '</span></div>' +
+      '<div class="stat"><span>Dream</span><span>' + (s.dream_active ? 'Running' : 'Idle') + '</span></div>';
+  } catch (e) {
+    document.getElementById('memStats').innerHTML = '<div class="stat">Error loading stats</div>';
+  }
+  document.getElementById('memModal').classList.add('show');
+}
+
+function closeMemory() { document.getElementById('memModal').classList.remove('show'); }
+
+async function runDream() {
+  if (!currentAgent) return;
+  try {
+    const res = await fetch('/api/dream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent_id: currentAgent.id })
+    });
+    const data = await res.json();
+    alert(data.result || data.error || 'Done');
+    showMemory();
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+// ── Knowledge Graph (Map) ───────────────────────────────────────────────
+
+let cy = null;
+
+function showMap() {
+  if (!currentSession) { alert('Select or create a session first'); return; }
+  document.getElementById('mapOverlay').classList.add('show');
+  refreshMap();
+}
+
+function closeMap() { document.getElementById('mapOverlay').classList.remove('show'); }
+
+async function refreshMap() {
+  if (!currentSession) return;
+  const status = document.getElementById('mapStatus');
+  const empty = document.getElementById('mapEmpty');
+  const sub = document.getElementById('mapSub');
+
+  empty.style.display = 'none';
+  status.style.display = 'block';
+  status.textContent = 'Extracting SPO triples...';
+  sub.textContent = 'Session ' + currentSession.slice(0, 8);
+
+  try {
+    const res = await fetch('/api/map?session_id=' + encodeURIComponent(currentSession));
+    if (!res.ok) {
+      const body = await res.text();
+      status.textContent = 'Error: ' + body;
+      if (body.includes('404') || res.status === 404) {
+        closeMap();
+        invalidateSession('Session expired. Create a new one.');
+        await refreshSessions();
+      }
+      return;
+    }
+    const data = await res.json();
+    renderGraph(data);
+    status.textContent = data.triple_count + ' triples \u00B7 ' + data.nodes.length + ' nodes \u00B7 ' + data.edges.length + ' edges';
+    if (data.triple_count === 0) empty.style.display = 'flex';
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+  }
+}
+
+function renderGraph(data) {
+  const elements = [];
+  for (const n of data.nodes) elements.push({ data: { id: n.id, label: n.label } });
+  let edgeIdx = 0;
+  for (const e of data.edges) {
+    elements.push({ data: { id: 'e' + (edgeIdx++), source: e.source, target: e.target, label: e.label } });
+  }
+
+  if (!cy) {
+    cy = cytoscape({
+      container: document.getElementById('cy'),
+      elements,
+      style: [
+        { selector: 'node', style: {
+          'background-color': '#3a3aaa', 'label': 'data(label)', 'color': '#e0e0e0',
+          'font-size': '12px', 'text-valign': 'center', 'text-halign': 'center',
+          'text-outline-color': '#0f0f0f', 'text-outline-width': 2,
+          'width': 'label', 'height': 'label', 'padding': '10px', 'shape': 'round-rectangle',
+        }},
+        { selector: 'edge', style: {
+          'width': 1.5, 'line-color': '#4a4a8a', 'target-arrow-color': '#4a4a8a',
+          'target-arrow-shape': 'triangle', 'curve-style': 'bezier',
+          'label': 'data(label)', 'font-size': '10px', 'color': '#aaa',
+          'text-background-color': '#0f0f0f', 'text-background-opacity': 0.8, 'text-background-padding': '2px',
+        }}
+      ],
+      layout: { name: 'cose', animate: false, padding: 40 }
+    });
+  } else {
+    cy.elements().remove();
+    cy.add(elements);
+    cy.layout({ name: 'cose', animate: false, padding: 40 }).run();
+  }
+}
+
+// ── LLM status ───────────────────────────────────────────────────────
+
+async function showLlm() {
+  document.getElementById('llmModal').classList.add('show');
+  const el = document.getElementById('llmContent');
+  el.textContent = 'Loading...';
+  try {
+    const res = await fetch('/api/llm');
+    if (!res.ok) { el.textContent = 'Error: ' + res.status; return; }
+    const d = await res.json();
+    let html = '';
+
+    // Primary
+    const dot = d.primary.reachable ? 'on' : 'off';
+    const status = d.primary.reachable ? 'Online' : 'Offline';
+    html += `<div class="llm-section">
+      <div class="title"><span class="dot ${dot}"></span>Primary — ${status}</div>
+      <div class="row"><span class="k">Provider</span><span class="v">${esc(d.primary.provider)}</span></div>
+      <div class="row"><span class="k">Model</span><span class="v">${esc(d.primary.model)}</span></div>
+      <div class="row"><span class="k">Endpoint</span><span class="v">${esc(d.primary.base_url)}</span></div>
+      <div class="row"><span class="k">Max tokens</span><span class="v">${d.primary.max_tokens}</span></div>
+      <div class="row"><span class="k">Temperature</span><span class="v">${d.primary.temperature ?? 'default'}</span></div>
+    </div>`;
+
+    // Fallback
+    if (d.fallback) {
+      html += `<div class="llm-section">
+        <div class="title">Fallback</div>
+        <div class="row"><span class="k">Provider</span><span class="v">${esc(d.fallback.provider)}</span></div>
+        <div class="row"><span class="k">Model</span><span class="v">${esc(d.fallback.model)}</span></div>
+        ${d.fallback.base_url ? '<div class="row"><span class="k">Endpoint</span><span class="v">' + esc(d.fallback.base_url) + '</span></div>' : ''}
+      </div>`;
+    }
+
+    // Fast
+    if (d.fast) {
+      html += `<div class="llm-section">
+        <div class="title">Fast (simple messages)</div>
+        <div class="row"><span class="k">Provider</span><span class="v">${esc(d.fast.provider)}</span></div>
+        <div class="row"><span class="k">Model</span><span class="v">${esc(d.fast.model)}</span></div>
+      </div>`;
+    }
+
+    // Budget
+    const pct = d.budget.limit > 0 ? Math.min(100, (d.budget.used / d.budget.limit) * 100) : 0;
+    const usedK = Math.round(d.budget.used / 1000);
+    const limitK = Math.round(d.budget.limit / 1000);
+    html += `<div class="llm-budget">
+      <div class="label"><span>Token Budget</span><span>${usedK}K / ${limitK}K</span></div>
+      <div class="bar-bg"><div class="bar-fill" style="width:${pct}%"></div></div>
+    </div>`;
+
+    el.innerHTML = html;
+  } catch (e) {
+    el.textContent = 'Failed to load: ' + e.message;
+  }
+}
+
+function closeLlm() { document.getElementById('llmModal').classList.remove('show'); }
+
+// ── Tool status polling ───────────────────────────────────────────────
+const toolStatusEl = document.getElementById('toolStatus');
+const toolStatusItems = document.getElementById('toolStatusItems');
+
+function formatElapsed(startTs, serverTs) {
+  const secs = Math.max(0, serverTs - startTs);
+  if (secs < 60) return secs + 's';
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return m + 'm ' + s + 's';
+}
+
+function toolDisplayName(name) {
+  const map = { claude_code: 'Claude Code', run_command: 'Command', agentic_loop: 'Tool Loop' };
+  return map[name] || name;
+}
+
+async function pollToolStatus() {
+  try {
+    const res = await fetch('/api/claude-status');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.count === 0) {
+      toolStatusEl.classList.remove('active');
+      return;
+    }
+    toolStatusEl.classList.add('active');
+    toolStatusItems.innerHTML = '';
+    for (const item of data.active) {
+      const div = document.createElement('div');
+      div.className = 'tool-item';
+      const elapsed = formatElapsed(item.started_at, data.server_time);
+      div.innerHTML = `<span class="indicator ${item.phase}"></span>`
+        + `<span class="tool-name">${toolDisplayName(item.tool)}</span>`
+        + `<span class="tool-desc">${esc(item.description)}</span>`
+        + (item.working_dir ? `<span class="tool-elapsed" title="${esc(item.working_dir)}">${elapsed}</span>` : `<span class="tool-elapsed">${elapsed}</span>`);
+      toolStatusItems.appendChild(div);
+    }
+  } catch (_) {}
+}
+
+setInterval(pollToolStatus, 2000);
+
+// Register service worker for PWA.
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
+</script>
+</body>
+</html>
