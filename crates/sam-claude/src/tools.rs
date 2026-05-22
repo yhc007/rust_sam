@@ -967,6 +967,7 @@ async fn exec_claude_code(input: &serde_json::Value, ctx: &ToolContext<'_>) -> R
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn exec_claude_code_inner(
     input: &serde_json::Value,
     _ctx: &ToolContext<'_>,
@@ -1085,7 +1086,7 @@ async fn exec_claude_code_inner(
             .arg("--output-format")
             .arg("text")
             .arg("--max-turns")
-            .arg(&max_turns)
+            .arg(max_turns)
             .arg("--permission-mode")
             .arg(&cc.default_permission_mode)
             .arg(prompt)
