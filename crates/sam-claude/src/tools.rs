@@ -24,10 +24,35 @@ use crate::mcp::McpClient;
 use crate::types::ToolDefinition;
 
 /// Maximum number of tool-use loop iterations per user message.
-pub const MAX_TOOL_ROUNDS: usize = 10;
+pub const MAX_TOOL_ROUNDS: usize = 30;
 
 /// Maximum output bytes returned from a command or file read.
-const MAX_OUTPUT_BYTES: usize = 8_000;
+const MAX_OUTPUT_BYTES: usize = 32_000;
+
+// ── Active tool tracking ─────────────────────────────────────────────
+
+/// Tracks currently active long-running tool executions (e.g. Claude Code).
+pub type ActiveToolTracker = Arc<Mutex<Vec<ActiveToolStatus>>>;
+
+/// Create a new empty tracker.
+pub fn new_tool_tracker() -> ActiveToolTracker {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+/// Status of a single active tool execution.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ActiveToolStatus {
+    /// Tool name (e.g. "claude_code", "run_command").
+    pub tool: String,
+    /// Short description / prompt summary.
+    pub description: String,
+    /// Working directory.
+    pub working_dir: String,
+    /// Unix timestamp when the tool started.
+    pub started_at: i64,
+    /// Current phase: "running", "completed", "error".
+    pub phase: String,
+}
 
 /// Runtime context passed to tool execution.
 pub struct ToolContext<'a> {
@@ -44,6 +69,8 @@ pub struct ToolContext<'a> {
     pub mcp_clients: Option<Arc<Mutex<Vec<McpClient>>>>,
     /// Custom skill store for user-defined tools.
     pub skill_store: Option<Arc<Mutex<SkillStore>>>,
+    /// Shared tracker for active long-running tools.
+    pub tool_tracker: Option<ActiveToolTracker>,
 }
 
 /// Names of core tools that smaller models (grok-3-mini, etc.) should always see.
@@ -181,8 +208,8 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "timeout_secs": {
                         "type": "integer",
-                        "description": "타임아웃 초 (기본 30, 최대 300)",
-                        "default": 30
+                        "description": "타임아웃 초 (기본 120, 최대 600)",
+                        "default": 120
                     }
                 },
                 "required": ["command"]
@@ -800,10 +827,22 @@ async fn exec_run_command(input: &serde_json::Value, ctx: &ToolContext<'_>) -> R
 
     let timeout = input["timeout_secs"]
         .as_u64()
-        .unwrap_or(30)
-        .min(300);
+        .unwrap_or(120)
+        .min(600);
 
     info!(command = command, cwd = %working_dir, "run_command");
+
+    // Record working_dir in tracker so session meta picks it up.
+    if let Some(ref tracker) = ctx.tool_tracker {
+        let mut t = tracker.lock().await;
+        t.push(ActiveToolStatus {
+            tool: "run_command".to_string(),
+            description: if command.len() > 60 { format!("{}…", &command[..60]) } else { command.to_string() },
+            working_dir: working_dir.clone(),
+            started_at: chrono::Utc::now().timestamp(),
+            phase: "completed".to_string(),
+        });
+    }
 
     let result = tokio::time::timeout(
         Duration::from_secs(timeout),
@@ -888,6 +927,56 @@ async fn exec_claude_code(input: &serde_json::Value, ctx: &ToolContext<'_>) -> R
     let timeout_secs = cc.hard_timeout_secs;
     let max_turns = cc.max_turns.to_string();
 
+    // Track this Claude Code session.
+    let desc = if prompt.len() > 80 {
+        format!("{}…", &prompt[..80])
+    } else {
+        prompt.to_string()
+    };
+    let cwd = input["working_dir"]
+        .as_str()
+        .unwrap_or(if host.is_some() { "~" } else { "/Volumes/T7/Sam" })
+        .to_string();
+    let tracker_entry = ActiveToolStatus {
+        tool: "claude_code".to_string(),
+        description: desc,
+        working_dir: cwd.clone(),
+        started_at: chrono::Utc::now().timestamp(),
+        phase: "running".to_string(),
+    };
+    let tracker_idx = if let Some(ref tracker) = ctx.tool_tracker {
+        let mut t = tracker.lock().await;
+        let idx = t.len();
+        t.push(tracker_entry);
+        Some((idx, Arc::clone(tracker)))
+    } else {
+        None
+    };
+
+    // Run the actual execution, then update tracker on completion.
+    let result = exec_claude_code_inner(input, ctx, prompt, cc, host, port, timeout_secs, &max_turns).await;
+
+    // Mark tracker entry as completed/error.
+    if let Some((idx, tracker)) = tracker_idx {
+        let mut t = tracker.lock().await;
+        if let Some(entry) = t.get_mut(idx) {
+            entry.phase = if result.is_ok() { "completed".to_string() } else { "error".to_string() };
+        }
+    }
+
+    result
+}
+
+async fn exec_claude_code_inner(
+    input: &serde_json::Value,
+    _ctx: &ToolContext<'_>,
+    prompt: &str,
+    cc: &sam_core::ClaudeCodeConfig,
+    host: Option<&str>,
+    port: u64,
+    timeout_secs: u64,
+    max_turns: &str,
+) -> Result<String, String> {
     // ── Remote execution via SSH ──────────────────────────────────────
     if let Some(host) = host {
         let working_dir = input["working_dir"]

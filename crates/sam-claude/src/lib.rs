@@ -33,5 +33,6 @@ pub use openai_client::OpenAiCompatibleClient;
 pub use probe::claude_version;
 pub use prompt::load_system_prompt;
 pub use session::ConversationSession;
+pub use tools::{ActiveToolStatus, ActiveToolTracker, new_tool_tracker};
 pub use types::{ChatMessage, ChatResponse};
 pub use xai::XaiClient;

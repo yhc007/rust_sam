@@ -53,6 +53,21 @@ impl ChatMessage {
         }
     }
 
+    /// Extract plain text content from this message.
+    pub fn text_content(&self) -> String {
+        match &self.content {
+            MessageContent::Text(t) => t.clone(),
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+        }
+    }
+
     /// Build a tool_result message (role = "user").
     pub fn tool_result(tool_use_id: &str, result: &str, is_error: bool) -> Self {
         Self {

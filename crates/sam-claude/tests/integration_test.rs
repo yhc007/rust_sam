@@ -99,7 +99,7 @@ async fn simple_text_reply() {
     let config = SamConfig::default();
 
     let reply = session
-        .reply(&mock, &mut budget, "안녕", &[], None, &config, None, None, None, None)
+        .reply(&mock, &mut budget, "안녕", &[], None, &config, None, None, None, None, None)
         .await
         .unwrap();
 
@@ -122,7 +122,7 @@ async fn tool_use_single_round() {
     let config = SamConfig::default();
 
     let reply = session
-        .reply(&mock, &mut budget, "지금 몇 시야?", &[], None, &config, None, None, None, None)
+        .reply(&mock, &mut budget, "지금 몇 시야?", &[], None, &config, None, None, None, None, None)
         .await
         .unwrap();
 
@@ -147,7 +147,7 @@ async fn tool_use_multi_round() {
     let config = SamConfig::default();
 
     let reply = session
-        .reply(&mock, &mut budget, "시간 두 번 확인해", &[], None, &config, None, None, None, None)
+        .reply(&mock, &mut budget, "시간 두 번 확인해", &[], None, &config, None, None, None, None, None)
         .await
         .unwrap();
 
@@ -163,7 +163,7 @@ async fn budget_exceeded_returns_limit_message() {
     let mut budget = TokenBudget::load_or_new(10);
 
     let reply = session
-        .reply(&mock, &mut budget, "hi", &[], None, &SamConfig::default(), None, None, None, None)
+        .reply(&mock, &mut budget, "hi", &[], None, &SamConfig::default(), None, None, None, None, None)
         .await
         .unwrap();
 
@@ -187,7 +187,7 @@ async fn session_history_trimmed() {
 
     for i in 1..=4 {
         session
-            .reply(&mock, &mut budget, &format!("msg {i}"), &[], None, &config, None, None, None, None)
+            .reply(&mock, &mut budget, &format!("msg {i}"), &[], None, &config, None, None, None, None, None)
             .await
             .unwrap();
     }
@@ -219,7 +219,7 @@ async fn api_error_does_not_grow_history() {
     let config = SamConfig::default();
 
     let result = session
-        .reply(&mock, &mut budget, "hello", &[], None, &config, None, None, None, None)
+        .reply(&mock, &mut budget, "hello", &[], None, &config, None, None, None, None, None)
         .await;
 
     assert!(result.is_err());
@@ -240,7 +240,7 @@ async fn tool_result_appears_in_history() {
     let config = SamConfig::default();
 
     session
-        .reply(&mock, &mut budget, "time?", &[], None, &config, None, None, None, None)
+        .reply(&mock, &mut budget, "time?", &[], None, &config, None, None, None, None, None)
         .await
         .unwrap();
 
@@ -290,7 +290,7 @@ async fn context_compaction_on_trim() {
 
     for i in 1..=3 {
         session
-            .reply(&mock, &mut budget, &format!("msg {i}"), &[], None, &config, None, None, None, None)
+            .reply(&mock, &mut budget, &format!("msg {i}"), &[], None, &config, None, None, None, None, None)
             .await
             .unwrap();
     }

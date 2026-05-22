@@ -62,6 +62,7 @@ pub async fn run_flow(
                     llm_client: None,
                     mcp_clients: None,
                     skill_store: None,
+                    tool_tracker: None,
                 };
                 execute_builtin_no_flow(tool, &input_val, &mut ctx).await
             }

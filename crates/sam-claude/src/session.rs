@@ -13,7 +13,7 @@ use sam_memory_adapter::MemoryAdapter;
 use crate::budget::TokenBudget;
 use crate::llm_client::LlmClient;
 use crate::mcp::McpClient;
-use crate::tools::{builtin_tool_definitions, execute_builtin, ToolContext, MAX_TOOL_ROUNDS, MAX_API_TOOLS};
+use crate::tools::{builtin_tool_definitions, execute_builtin, ActiveToolTracker, ToolContext, MAX_TOOL_ROUNDS, MAX_API_TOOLS};
 use crate::types::*;
 
 /// Default maximum characters for the rolling context summary.
@@ -198,6 +198,7 @@ impl ConversationSession {
         flow_store: Option<Arc<Mutex<FlowStore>>>,
         mcp_clients: Option<Arc<Mutex<Vec<McpClient>>>>,
         skill_store: Option<Arc<Mutex<sam_core::SkillStore>>>,
+        tool_tracker: Option<ActiveToolTracker>,
     ) -> anyhow::Result<String> {
         // Trim history *before* adding the new message to prevent unbounded growth.
         // Compact dropped messages into context_summary.
@@ -270,7 +271,7 @@ impl ConversationSession {
         let mut total_output = 0u32;
         // Track how many times each tool has been called to prevent loops.
         let mut tool_call_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-        const MAX_SAME_TOOL_CALLS: u32 = 2;
+        const MAX_SAME_TOOL_CALLS: u32 = 15;
         // Collect __ATTACHMENT__ markers from tool results so they're
         // always included in the final response (LLM may omit them).
         let mut collected_attachments: Vec<String> = Vec::new();
@@ -302,6 +303,21 @@ impl ConversationSession {
                     tools = resp.tool_calls.len(),
                     "tool_use round"
                 );
+
+                // Update tracker with current agentic loop status.
+                if let Some(ref tracker) = tool_tracker {
+                    let tool_names: Vec<&str> = resp.tool_calls.iter().map(|t| t.name.as_str()).collect();
+                    let mut t = tracker.lock().await;
+                    // Remove any previous "agentic_loop" entry.
+                    t.retain(|s| s.tool != "agentic_loop");
+                    t.push(crate::tools::ActiveToolStatus {
+                        tool: "agentic_loop".to_string(),
+                        description: format!("Round {}/{MAX_TOOL_ROUNDS}: {}", round + 1, tool_names.join(", ")),
+                        working_dir: String::new(),
+                        started_at: chrono::Utc::now().timestamp(),
+                        phase: "running".to_string(),
+                    });
+                }
 
                 // Build the assistant message with the full content blocks.
                 let mut blocks: Vec<ContentBlock> = Vec::new();
@@ -351,6 +367,7 @@ impl ConversationSession {
                         llm_client: Some(client),
                         mcp_clients: mcp_clients.clone(),
                         skill_store: skill_store.clone(),
+                        tool_tracker: tool_tracker.clone(),
                     };
                     let result = execute_builtin(&tc.name, &tc.input, &mut ctx).await;
                     let (result_text, is_error) = match result {
@@ -376,6 +393,12 @@ impl ConversationSession {
                 }
 
                 continue;
+            }
+
+            // Clean up agentic loop tracker entry.
+            if let Some(ref tracker) = tool_tracker {
+                let mut t = tracker.lock().await;
+                t.retain(|s| s.tool != "agentic_loop");
             }
 
             // stop_reason is "end_turn" (or max_tokens, etc.) — we have the final text.
@@ -428,6 +451,12 @@ impl ConversationSession {
             }
 
             return Ok(final_text);
+        }
+
+        // Clean up tracker on exhaustion.
+        if let Some(ref tracker) = tool_tracker {
+            let mut t = tracker.lock().await;
+            t.retain(|s| s.tool != "agentic_loop");
         }
 
         warn!(
@@ -808,6 +837,18 @@ impl ConversationSession {
     /// Read-only access to current history.
     pub fn history(&self) -> &[ChatMessage] {
         &self.history
+    }
+
+    /// Concatenate all user/assistant text messages into a single string.
+    pub fn history_text(&self) -> String {
+        self.history
+            .iter()
+            .filter_map(|m| {
+                let text = m.text_content();
+                if text.is_empty() { None } else { Some(format!("{}: {text}", m.role)) }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Number of tool definitions registered in this session.
