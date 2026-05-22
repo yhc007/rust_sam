@@ -4,67 +4,127 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Sam is a personal AI agent that communicates via iMessage, powered by the Claude API. It runs as a macOS LaunchAgent daemon that polls the iMessage database, routes messages through Claude with tool_use, and sends responses back via AppleScript.
+Sam is a personal AI agent accessible via iMessage, Telegram, and a web chat UI. It runs as a macOS daemon that polls the iMessage database, routes messages through LLM APIs with an agentic tool-use loop, and responds via AppleScript. The web chat (`sam-agent web`) works on any platform including Linux.
 
-## Build & Test Commands
+## Build & Test
 
 ```bash
-cargo build -p sam-agent                # Build the daemon binary
-cargo build -p sam-agent --release      # Release build
-cargo test --workspace                  # Run all ~70 tests
-cargo test -p sam-claude                # Test a single crate
-cargo test -p sam-claude -- test_name   # Run a single test
-SAM_LOG=info cargo run -p sam-agent -- daemon   # Run the daemon
-cargo clippy --workspace               # Lint
+cargo build -p sam-agent                          # Debug build
+cargo build -p sam-agent --release                # Release build
+cargo test --workspace                            # All tests
+cargo test -p sam-claude                          # Single crate
+cargo test -p sam-claude -- deserialize_text      # Single test by name
+cargo clippy --workspace -- -D warnings           # Lint (treat warnings as errors)
+
+# Run daemon (requires ~/.sam/config.toml + API key)
+SAM_LOG=info cargo run -p sam-agent -- daemon
+
+# Run web chat only (no iMessage dependency, works on Linux)
+cargo run -p sam-agent -- web --port 3547
+
+# Other subcommands: status, chat, telegram, dashboard, send, import-memories
 ```
 
 ## Architecture
 
-The system is a Cargo workspace with 5 library crates and 1 binary service:
+Cargo workspace: 5 library crates + 1 binary service + 1 vendored submodule.
 
-**Dependency graph:**
 ```
-sam-agent (binary)
-├── sam-claude       ← Claude API client, ConversationSession, tool execution
-│   ├── sam-core     ← SamConfig, paths, error types (leaf crate)
-│   └── sam-memory-adapter  ← adapter to memory-brain (vendor submodule)
-│       └── sam-core
-├── sam-imessage     ← chat.db poller (rusqlite), osascript sender
+sam-agent (binary — daemon, web, chat, telegram, etc.)
+├── sam-claude       ← LLM clients, ConversationSession, tool execution, flows
+│   ├── sam-core     ← SamConfig, paths, agents, flows, skills, cron (leaf crate)
+│   └── sam-memory-adapter  ← wrapper around memory-brain MemoryGuardian
+│       └── memory-actor (vendor/memory-brain)
+├── sam-imessage     ← macOS-only: chat.db poller (rusqlite), osascript sender
 │   └── sam-core
 └── sam-tools        ← external tool registry (~/.sam/tools/*.toml)
     └── sam-core
 ```
 
-**Three concurrent tokio tasks in the daemon:**
-1. **Poller** — reads chat.db every 1s, filters by allowed_handles, sends `IncomingMessage` to channel
-2. **Router** — receives messages, manages per-handle `ConversationSession`, calls Claude API with agentic tool loop (max 10 iterations), stores to memory
-3. **Sender** — rate-limited queue (300ms/msg), sends via osascript
+### Daemon Task Architecture
 
-**Key types:**
-- `SamConfig` (sam-core) — root config loaded from `~/.sam/config.toml`
-- `SamClaudeClient` (sam-claude) — HTTP client with retry on 429/5xx
-- `ConversationSession` (sam-claude) — per-handle history, token budget, tool-use loop
-- `TokenBudget` (sam-claude) — daily token cap with midnight auto-reset
-- `ChatDbReader` (sam-imessage) — read-only SQLite access to macOS chat.db
+Three concurrent tokio tasks connected via `mpsc` channels:
 
-**Built-in tools (7):** memory_recall, memory_store, current_time, run_command, read_file, write_file, claude_code
+1. **Poller** (`sam-imessage`) — reads `~/Library/Messages/chat.db` every `poll_interval_ms`, filters by `allowed_handles`, emits `IncomingMessage`
+2. **Router** (`sam-agent/cmd/daemon.rs`) — receives messages, maintains per-handle `ConversationSession`, calls LLM with agentic tool loop (max `MAX_TOOL_ROUNDS=30` iterations), handles memory recall/store, fallback LLM on failure
+3. **Sender** (`sam-imessage`) — rate-limited queue (`send_rate_limit_ms`), dispatches via osascript
+
+Plus optional tasks: web server, cron scheduler, heartbeat, hot-reload watcher.
+
+### LLM Provider Abstraction
+
+Trait `LlmBackend: Send + Sync` with a single async `chat()` method. Three implementations:
+
+| Provider | Client | Wire Format |
+|----------|--------|-------------|
+| `anthropic` (default) | `SamClaudeClient` | Claude Messages API |
+| `xai` | `XaiClient` | OpenAI-compatible |
+| `openai-compatible` | `OpenAiCompatibleClient` | OpenAI chat completions (vLLM, local models) |
+
+Selected by `config.llm.provider`. Fallback client (`config.llm.fallback`) is tried when primary fails. Fast client (`config.llm.fast`) used for trivial messages.
+
+### Agentic Tool Loop (`session.rs`)
+
+1. User message → append to history → call LLM with system prompt + history + tool definitions
+2. If `stop_reason == "tool_use"` → execute each tool via `execute_builtin()` → append `tool_result` → re-call LLM
+3. Repeat up to `MAX_TOOL_ROUNDS` (30). Same tool capped at `MAX_SAME_TOOL_CALLS` (15) per turn.
+4. On `stop_reason == "end_turn"` → return final text, auto-store conversation to memory.
+
+Context compaction: when history tokens exceed `max_context_tokens` (default 16,000), oldest messages are summarized into `context_summary` and dropped.
+
+### Built-in Tools (15)
+
+Defined in `sam-claude/src/tools.rs`. Key ones:
+- `memory_recall` / `memory_store` — long-term memory via MemoryAdapter
+- `run_command` — shell execution with safety filtering, 120s default timeout, 600s max
+- `claude_code` — spawns Claude Code CLI (`--print` mode), supports local and remote (SSH) execution
+- `read_file` / `write_file` — file I/O with line limits and auto-mkdir
+- `web_search` — Tavily or xAI search provider
+- `schedule_reminder` / `list_reminders` / `cancel_reminder` — cron-based scheduling
+- `handoff_to_agent` — transfer conversation to another agent with context
+- `notion_create_page` — Notion API integration
+
+External tools loaded from `~/.sam/tools/*.toml` (SkillStore) and MCP servers (`[mcp]` config).
+
+### Web Chat (`cmd/web.rs`)
+
+Axum HTTP server with REST API, token-based auth (HttpOnly cookie), multi-session support.
+
+Key endpoints:
+- `/api/login`, `/api/logout`, `/api/me` — auth
+- `/api/sessions` (GET/POST), `/api/sessions/{id}` (DELETE/PATCH) — session CRUD
+- `/api/chat` — send message, get reply (uses same `session.reply()` as iMessage)
+- `/api/agents` — list available agents
+- `/api/memory`, `/api/dream` — memory stats and consolidation
+- `/api/claude-status` — active tool execution status (for real-time UI)
+- `/api/map` — knowledge graph (SPO triple extraction via LLM)
+
+Frontend is a single `static/chat.html` (inline CSS/JS) embedded via `include_str!`.
+
+### Memory System
+
+`MemoryAdapter` wraps `memory-brain`'s `MemoryGuardian` (vendored submodule). BGE-M3 HTTP embeddings with hash-based fallback when embedder is unreachable. Persisted to `~/.sam/data/memories.json`.
+
+Auto-recall injects relevant memories into system prompt before each LLM call. Auto-store saves conversation after each response. Tools `memory_recall`/`memory_store` allow explicit access.
 
 ## Configuration
 
-Config file: `~/.sam/config.toml` with sections: identity, imessage, llm, memory, claude_code, safety.
+`~/.sam/config.toml` — main config with sections: `[identity]`, `[imessage]`, `[llm]` (+ `[llm.fallback]`, `[llm.fast]`), `[memory]`, `[claude_code]`, `[safety]`, `[notion]`, `[telegram]`, `[web_search]`, `[whisper]`, `[heartbeat]`, `[mcp]`, `[agents]`, `[browser]`, `[web_chat]`.
 
-API key loaded from `api_key_source` (supports `file:~/.sam/anthropic_key` or `env:VAR_NAME`).
+API keys: `api_key_source = "file:~/.sam/anthropic_key"` or `"env:VAR_NAME"`.
 
-System prompt loaded from `~/.sam/prompts/system.txt`.
+System prompt: `~/.sam/prompts/system.txt`. Per-agent prompts: `~/.sam/prompts/{name}.md`.
 
-## Safety
+Agents: `~/.sam/agents/*.toml`. Flows: `~/.sam/flows/*.toml`. Skills: `~/.sam/tools/*.toml`.
 
-Destructive command patterns (rm -rf, sudo, git push --force, DROP TABLE, etc.) are blocked via pattern matching in `[safety]` config. The claude_code tool runs in `--print` (non-interactive) mode with a 2-hour timeout.
+## Key Conventions
+
+- **Error handling:** `thiserror` in library crates, `anyhow` in sam-agent. No `unwrap()`/`panic!()` in production paths — propagate with `?`.
+- **Async:** all I/O-bound work is async (tokio). CPU-bound parsing/formatting stays sync.
+- **Korean:** user-facing messages (error strings, system prompts) are in Korean. Code identifiers and comments in English.
+- **Config hot-reload:** `~/.sam/config.toml` and `~/.sam/flows/` are polled for changes; no daemon restart needed for most config changes.
+- **Safety:** destructive patterns in `[safety].destructive_patterns` are blocked by `run_command`. Claude Code runs with `--print` + configured permission mode.
 
 ## Submodule
 
-`vendor/memory-brain/` is a git submodule (github.com/yhc007/memory-brain). Clone with `--recurse-submodules`. It provides `memory-actor` for BGE-M3 embeddings with hash-based fallback.
-
-## Language
-
-The project documentation (PROJECT_SUMMARY.md) and some comments are in Korean. The codebase itself uses English identifiers.
+`vendor/memory-brain/` is a git submodule. Clone with `--recurse-submodules` or run `git submodule update --init --recursive`.
