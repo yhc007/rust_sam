@@ -19,8 +19,8 @@ pub mod tier;
 pub use agent::{AgentDef, AgentStore, ToolFilter, agents_dir};
 pub use config::{load_config, AgentConfig, BrowserConfig, ClaudeCodeConfig, HeartbeatConfig,
     IMessageConfig, IdentityConfig, LlmConfig, McpConfig, McpServerConfig, MemoryConfig,
-    NotionConfig, SafetyConfig, SamConfig, TelegramConfig, TwitterConfig, WebSearchConfig,
-    WhisperConfig};
+    NotionConfig, SafetyConfig, SamConfig, TelegramConfig, TwitterConfig, WebChatConfig,
+    WebSearchConfig, WhisperConfig};
 pub use cron_store::{CronJob, CronSchedule, CronStore, cron_matches, new_job, parse_datetime_to_unix};
 pub use delivery_queue::{DeliveryQueue, QueuedMessage};
 pub use error::SamError;

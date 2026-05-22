@@ -43,6 +43,8 @@ pub struct SamConfig {
     pub agents: AgentConfig,
     #[serde(default)]
     pub browser: BrowserConfig,
+    #[serde(default)]
+    pub web_chat: WebChatConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -554,6 +556,38 @@ impl Default for BrowserConfig {
             chrome_path: Self::default_chrome(),
             timeout_secs: Self::default_timeout(),
             max_content_bytes: Self::default_max_content(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebChatConfig {
+    /// Enable the web chat server alongside the iMessage daemon.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Port to listen on.
+    #[serde(default = "WebChatConfig::default_port")]
+    pub port: u16,
+    /// Username for web login.
+    #[serde(default = "WebChatConfig::default_username")]
+    pub username: String,
+    /// Password for web login.
+    #[serde(default)]
+    pub password: String,
+}
+
+impl WebChatConfig {
+    fn default_port() -> u16 { 3547 }
+    fn default_username() -> String { "paul".to_string() }
+}
+
+impl Default for WebChatConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: Self::default_port(),
+            username: Self::default_username(),
+            password: String::new(),
         }
     }
 }
