@@ -24,6 +24,8 @@ use sam_imessage::outbound::run_sender;
 use sam_imessage::poller::run_poller;
 use sam_imessage::types::{IncomingMessage, OutgoingMessage};
 
+use super::web::{self, WebAppState};
+
 /// Maximum length of a single iMessage before splitting.
 const MSG_SPLIT_LEN: usize = 500;
 
@@ -336,6 +338,12 @@ pub async fn run() -> i32 {
             }
         }
     });
+
+    // Pre-clone for the web chat server (before router moves these).
+    let web_system_prompt = system_prompt.clone();
+    let web_cron_store = Arc::clone(&cron_store);
+    let web_flow_store = Arc::clone(&flow_store);
+    let web_skill_store = Arc::clone(&skill_store);
 
     // Pre-clone for the heartbeat task (before router moves these).
     let heartbeat_tx = outbound_tx.clone();
@@ -784,6 +792,7 @@ pub async fn run() -> i32 {
                             Some(Arc::clone(&router_flow_store)),
                             Some(Arc::clone(&router_mcp_clients)),
                             Some(Arc::clone(&router_skill_store)),
+                            None,
                         ).await {
                             Ok(text) => {
                                 consecutive_errors.remove(&m.sender);
@@ -809,6 +818,7 @@ pub async fn run() -> i32 {
                                         Some(Arc::clone(&router_flow_store)),
                                         Some(Arc::clone(&router_mcp_clients)),
                                         Some(Arc::clone(&router_skill_store)),
+                                        None,
                                     ).await {
                                         Ok(text) => {
                                             info!(sender = %m.sender, "fallback LLM succeeded");
@@ -1281,6 +1291,44 @@ pub async fn run() -> i32 {
         }
     });
 
+    // ── Web chat server (optional) ──────────────────────────────────────
+    let web_handle = if config.web_chat.enabled {
+        let web_cancel = cancel.clone();
+        let web_port = config.web_chat.port;
+
+        let web_fallback: Option<Arc<dyn LlmBackend>> = config.llm.fallback_config().and_then(|cfg| {
+            build_optional_client(&cfg, "Web-Fallback")
+        });
+
+        let web_agent_store = Arc::new(Mutex::new(AgentStore::load()));
+
+        let web_state = Arc::new(Mutex::new(WebAppState {
+            sessions: std::collections::HashMap::new(),
+            session_meta: Vec::new(),
+            client: Arc::clone(&client),
+            fallback_client: web_fallback,
+            budget: TokenBudget::load_or_new(config.llm.daily_token_budget),
+            memory: MemoryAdapter::from_config(&config.memory).ok(),
+            config: config.clone(),
+            cron_store: Some(web_cron_store),
+            flow_store: Some(web_flow_store),
+            skill_store: Some(web_skill_store),
+            agent_store: web_agent_store,
+            auth_tokens: std::collections::HashMap::new(),
+            system_prompt: web_system_prompt,
+            tool_tracker: sam_claude::new_tool_tracker(),
+        }));
+
+        Some(tokio::spawn(async move {
+            if let Err(e) = web::run_web_server(web_port, web_state, web_cancel).await {
+                error!("web chat server error: {e}");
+            }
+        }))
+    } else {
+        info!("Web chat server disabled (set [web_chat] enabled = true to activate)");
+        None
+    };
+
     // Wait for SIGINT (Ctrl+C) or SIGTERM.
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("failed to register SIGTERM handler");
@@ -1295,6 +1343,9 @@ pub async fn run() -> i32 {
         poller_handle, sender_handle, router_handle, cron_handle,
         flow_handle, reload_handle, stats_handle, heartbeat_handle
     );
+    if let Some(h) = web_handle {
+        let _ = h.await;
+    }
     info!("Sam daemon stopped");
     0
 }

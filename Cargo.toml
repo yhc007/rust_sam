@@ -8,6 +8,9 @@ members = [
     "crates/sam-memory-adapter",
     "services/sam-agent",
 ]
+exclude = [
+    "vendor/memory-brain",
+]
 
 [workspace.package]
 version = "0.1.0"
