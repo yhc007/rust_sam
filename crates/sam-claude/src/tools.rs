@@ -2437,7 +2437,7 @@ mod tests {
     fn unknown_tool_is_rejected() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let config = SamConfig::default();
-        let mut ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new(), flow_store: None, llm_client: None, mcp_clients: None, skill_store: None };
+        let mut ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new(), flow_store: None, llm_client: None, mcp_clients: None, skill_store: None, tool_tracker: None };
         let input = json!({});
         let result = rt.block_on(execute_builtin("nonexistent", &input, &mut ctx));
         assert!(result.is_err());
@@ -2446,7 +2446,7 @@ mod tests {
     #[test]
     fn memory_recall_without_adapter_returns_error() {
         let config = SamConfig::default();
-        let mut ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new(), flow_store: None, llm_client: None, mcp_clients: None, skill_store: None };
+        let mut ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new(), flow_store: None, llm_client: None, mcp_clients: None, skill_store: None, tool_tracker: None };
         let input = json!({"query": "test"});
         let result = exec_memory_recall(&input, &mut ctx);
         assert!(result.is_err());
@@ -2456,7 +2456,7 @@ mod tests {
     #[test]
     fn memory_store_without_adapter_returns_error() {
         let config = SamConfig::default();
-        let mut ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new(), flow_store: None, llm_client: None, mcp_clients: None, skill_store: None };
+        let mut ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new(), flow_store: None, llm_client: None, mcp_clients: None, skill_store: None, tool_tracker: None };
         let input = json!({"text": "remember this"});
         let result = exec_memory_store(&input, &mut ctx);
         assert!(result.is_err());
@@ -2499,7 +2499,7 @@ mod tests {
     fn run_command_works() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let config = SamConfig::default();
-        let ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new(), flow_store: None, llm_client: None, mcp_clients: None, skill_store: None };
+        let ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new(), flow_store: None, llm_client: None, mcp_clients: None, skill_store: None, tool_tracker: None };
         let input = json!({"command": "echo hello", "working_dir": "/tmp"});
         let result = rt.block_on(exec_run_command(&input, &ctx));
         assert!(result.is_ok());
@@ -2511,7 +2511,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut config = SamConfig::default();
         config.safety.destructive_patterns = vec!["rm -rf".to_string()];
-        let ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new(), flow_store: None, llm_client: None, mcp_clients: None, skill_store: None };
+        let ctx = ToolContext { memory: None, config: &config, cron_store: None, sender_handle: String::new(), flow_store: None, llm_client: None, mcp_clients: None, skill_store: None, tool_tracker: None };
         let input = json!({"command": "rm -rf /"});
         let result = rt.block_on(exec_run_command(&input, &ctx));
         assert!(result.is_err());
